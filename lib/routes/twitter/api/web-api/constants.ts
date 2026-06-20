@@ -10,7 +10,7 @@ const initGqlMap = async () => {
     gqlMap = buildGqlMap(queryIds);
 };
 
-const thirdPartySupportedAPI = ['UserByScreenName', 'UserByRestId', 'UserTweets', 'UserTweetsAndReplies', 'ListLatestTweetsTimeline', 'SearchTimeline', 'UserMedia'];
+const thirdPartySupportedAPI = ['UserByScreenName', 'UserByRestId', 'UserTweets', 'UserTweetsAndReplies', 'ListLatestTweetsTimeline', 'SearchTimeline', 'UserMedia', 'Likes'];
 
 const gqlFeatureUser = {
     hidden_profile_subscriptions_enabled: true,

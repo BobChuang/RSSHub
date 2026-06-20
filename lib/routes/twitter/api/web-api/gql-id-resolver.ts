@@ -17,6 +17,7 @@ export const fallbackIds: Record<string, string> = {
     SearchTimeline: 'yIphfmxUO-hddQHKIOk9tA',
     ListLatestTweetsTimeline: 'Pa45JvqZuKcW1plybfgBlQ',
     TweetDetail: 'QuBlQ6SxNAQCt6-kBiCXCQ',
+    Likes: 'enfPHxWV3DDAG1XBw3obTg',
 };
 
 const operationNames = Object.keys(fallbackIds);
