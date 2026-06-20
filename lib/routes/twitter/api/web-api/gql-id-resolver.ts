@@ -14,7 +14,7 @@ export const fallbackIds: Record<string, string> = {
     UserTweetsAndReplies: 'bt4TKuFz4T7Ckk-VvQVSow',
     UserMedia: 'dexO_2tohK86JDudXXG3Yw',
     UserByRestId: 'Qw77dDjp9xCpUY-AXwt-yQ',
-    SearchTimeline: 'UN1i3zUiCWa-6r-Uaho4fw',
+    SearchTimeline: 'yIphfmxUO-hddQHKIOk9tA',
     ListLatestTweetsTimeline: 'Pa45JvqZuKcW1plybfgBlQ',
     TweetDetail: 'QuBlQ6SxNAQCt6-kBiCXCQ',
 };

@@ -12,6 +12,7 @@ import proxy from '@/utils/proxy';
 
 import { baseUrl, bearerToken, gqlFeatures, gqlMap, thirdPartySupportedAPI } from './constants';
 import login from './login';
+import { generateClientTransactionId } from './transaction-id';
 
 let authTokenIndex = 0;
 
@@ -150,6 +151,8 @@ export const twitterGot = async (
     // Because undici.fetch is the standard Fetch API and does not support ofetch's
     // `onResponse` callback, the rate-limit and auth error handling that was
     // previously in `onResponse` is now inlined below.
+    const requestPath = new URL(requestUrl).pathname;
+    const clientTransactionId = await generateClientTransactionId('GET', requestPath, dispatchers?.agent);
     const response = await undici.fetch(requestUrl, {
         headers: {
             authority: 'x.com',
@@ -163,6 +166,7 @@ export const twitterGot = async (
             referer: 'https://x.com/',
             'x-twitter-active-user': 'yes',
             'x-twitter-client-language': 'en',
+            'x-client-transaction-id': clientTransactionId,
             'x-csrf-token': jsonCookie.ct0,
             ...(auth?.token
                 ? {

@@ -143,6 +143,8 @@ const getSearch = async (keywords: string, params?: Record<string, any>) =>
                 count: 20,
                 querySource: 'typed_query',
                 product: 'Latest',
+                withGrokTranslatedBio: false,
+                withQuickPromoteEligibilityTweetFields: false,
             },
             ['search_by_raw_query', 'search_timeline', 'timeline']
         )
