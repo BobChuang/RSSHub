@@ -8,6 +8,7 @@ import { handler as namespaceAllHandler, route as namespaceAllRoute } from '@/ap
 import { handler as namespaceOneHandler, route as namespaceOneRoute, routeNested as namespaceOneNestedRoute } from '@/api/namespace/one';
 import { handler as radarRulesAllHandler, route as radarRulesAllRoute } from '@/api/radar/rules/all';
 import { handler as radarRulesOneHandler, route as radarRulesOneRoute } from '@/api/radar/rules/one';
+import reader from '@/api/reader';
 import { handler as routeStatusHandler, route as routeStatusRoute } from '@/api/route/status';
 
 const app = new OpenAPIHono();
@@ -20,6 +21,7 @@ app.openapi(radarRulesOneRoute, radarRulesOneHandler);
 app.openapi(categoryOneRoute, categoryOneHandler);
 app.openapi(routeStatusRoute, routeStatusHandler);
 app.openapi(followConfigRoute, followConfigHandler);
+app.route('/reader', reader);
 
 const docs = app.getOpenAPI31Document({
     openapi: '3.1.0',
