@@ -242,6 +242,69 @@ input:disabled {
     padding-right: 2px;
 }
 
+.sidebar-settings {
+    position: relative;
+    display: flex;
+    align-items: center;
+    min-height: 40px;
+}
+
+.settings-button {
+    display: grid;
+    width: 40px;
+    height: 40px;
+    place-items: center;
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    background: var(--panel-strong);
+    color: var(--ink);
+    font-size: 18px;
+    line-height: 1;
+}
+
+.settings-button:hover,
+.settings-button[aria-expanded='true'] {
+    border-color: rgb(17 167 232 / 0.45);
+    background: rgb(17 167 232 / 0.1);
+    color: var(--cyan);
+}
+
+.settings-menu {
+    position: absolute;
+    bottom: calc(100% + 8px);
+    left: 0;
+    z-index: 8;
+    display: grid;
+    width: 180px;
+    gap: 6px;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    background: #181b1d;
+    box-shadow: 0 16px 36px rgb(0 0 0 / 0.35);
+    padding: 8px;
+}
+
+.settings-menu[hidden] {
+    display: none;
+}
+
+.settings-menu-button {
+    min-height: 36px;
+    border: 1px solid transparent;
+    border-radius: 8px;
+    background: transparent;
+    color: var(--ink);
+    font-size: 13px;
+    font-weight: 800;
+    text-align: left;
+    padding: 0 10px;
+}
+
+.settings-menu-button:hover {
+    border-color: rgb(255 255 255 / 0.08);
+    background: var(--panel);
+}
+
 .feed-group {
     display: grid;
     gap: 6px;

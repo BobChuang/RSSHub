@@ -5,8 +5,8 @@ export const readerHtml = String.raw`<!doctype html>
         <meta name="viewport" content="width=device-width, initial-scale=1">
         <title>RSSHub Reader</title>
         <link rel="icon" href="/favicon.png">
-        <link rel="stylesheet" href="/reader/app.css?v=group-unread-counts">
-        <script type="module" src="/reader/app.js?v=group-unread-counts"></script>
+        <link rel="stylesheet" href="/reader/app.css?v=settings-config-menu">
+        <script type="module" src="/reader/app.js?v=settings-config-menu"></script>
     </head>
     <body>
         <main class="app-shell">
@@ -59,6 +59,14 @@ export const readerHtml = String.raw`<!doctype html>
                 </nav>
 
                 <div class="source-list" id="sourceList" aria-label="Feed sources"></div>
+                <footer class="sidebar-settings">
+                    <button id="settingsButton" class="settings-button" type="button" title="Settings" aria-label="Settings" aria-expanded="false">⚙</button>
+                    <div id="settingsMenu" class="settings-menu" hidden>
+                        <button id="importConfigButton" class="settings-menu-button" type="button">导入配置</button>
+                        <button id="exportConfigButton" class="settings-menu-button" type="button">导出配置</button>
+                    </div>
+                    <input id="importConfigInput" type="file" accept="application/json,.json" hidden>
+                </footer>
             </aside>
 
             <section class="article-column">
