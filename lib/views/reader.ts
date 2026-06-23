@@ -5,8 +5,8 @@ export const readerHtml = String.raw`<!doctype html>
         <meta name="viewport" content="width=device-width, initial-scale=1">
         <title>RSSHub Reader</title>
         <link rel="icon" href="/favicon.png">
-        <link rel="stylesheet" href="/reader/app.css?v=category-chat">
-        <script type="module" src="/reader/app.js?v=category-chat"></script>
+        <link rel="stylesheet" href="/reader/app.css?v=group-unread-counts">
+        <script type="module" src="/reader/app.js?v=group-unread-counts"></script>
     </head>
     <body>
         <main class="app-shell">
