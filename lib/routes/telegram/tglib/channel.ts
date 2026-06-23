@@ -5,7 +5,7 @@ import { HTMLParser } from 'telegram/extensions/html.js';
 import { returnBigInt } from 'telegram/Helpers.js';
 import { getDisplayName } from 'telegram/Utils.js';
 
-import type { DataItem } from '@/types';
+import type { Data, DataItem } from '@/types';
 import cache from '@/utils/cache';
 
 import { getClient, getDocument, getFilename, unwrapMedia } from './client';
@@ -135,9 +135,8 @@ export function humanDuration(seconds: number) {
     return `0:${paddedSeconds}`; // Show only seconds
 }
 
-export default async function handler(ctx: Context) {
+export async function getTelegramChannel(ctx: Context, username: string, options: { replyTo?: number; title?: string; link?: string; description?: string } = {}) {
     const client = await getClient();
-    const username = ctx.req.param('username');
 
     let peerCache = await cache.get(`telegram:inputEntity:${username}`);
     if (!peerCache) {
@@ -151,7 +150,7 @@ export default async function handler(ctx: Context) {
     const entity = await client.getEntity(peer);
 
     let attachments: string[] = [];
-    const messages = await client.getMessages(peer, { limit: 50 });
+    const messages = await client.getMessages(peer, { limit: 50, replyTo: options.replyTo });
 
     let i = 0;
     const item: DataItem[] = [];
@@ -207,11 +206,15 @@ export default async function handler(ctx: Context) {
     }
 
     return {
-        title: getDisplayName(entity),
+        title: options.title ?? getDisplayName(entity),
         language: null,
-        link: `https://t.me/${username}`,
+        link: options.link ?? `https://t.me/${username}`,
         item,
         allowEmpty: ctx.req.param('id') === 'allow_empty',
-        description: `@${username} on Telegram`,
-    };
+        description: options.description ?? `@${username} on Telegram`,
+    } as Data;
+}
+
+export default async function handler(ctx: Context) {
+    return await getTelegramChannel(ctx, ctx.req.param('username'));
 }
