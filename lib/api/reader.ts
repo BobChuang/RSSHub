@@ -42,6 +42,14 @@ async function ensureSchema() {
                 updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
             );
 
+            CREATE TABLE IF NOT EXISTS reader_discord_author_roles (
+                guild_id TEXT NOT NULL,
+                author TEXT NOT NULL,
+                role TEXT NOT NULL,
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                PRIMARY KEY (guild_id, author)
+            );
+
             CREATE INDEX IF NOT EXISTS reader_items_pub_date_ms_idx ON reader_items (pub_date_ms DESC);
             CREATE INDEX IF NOT EXISTS reader_items_feed_pub_date_idx ON reader_items (feed_id, pub_date_ms DESC);
             CREATE INDEX IF NOT EXISTS reader_items_category_pub_date_idx ON reader_items (category, pub_date_ms DESC);
@@ -75,6 +83,25 @@ function normalizeOffset(value: string | undefined) {
 
 function normalizeSummaryDays(value: unknown) {
     return Number(value) === 7 ? 7 : 1;
+}
+
+function normalizeSummaryFeedIds(value: unknown) {
+    if (!Array.isArray(value)) {
+        return [];
+    }
+    return [...new Set(value.map((feedId) => String(feedId || '').trim()).filter(Boolean))].slice(0, 100);
+}
+
+function normalizeDiscordRole(value: unknown) {
+    const role = String(value || '').trim();
+    return ['admin', 'bot', 'user'].includes(role) ? role : 'user';
+}
+
+function normalizeDiscordAuthors(value: unknown) {
+    if (!Array.isArray(value)) {
+        return [];
+    }
+    return [...new Set(value.map((author) => String(author || '').trim()).filter(Boolean))].slice(0, 200);
 }
 
 function rowToItem(row) {
@@ -145,6 +172,45 @@ function buildSummaryPrompt(items, days: number) {
         `共收集到 ${items.length} 条，以下最多展示 80 条：`,
         lines.join('\n\n'),
     ].join('\n');
+}
+
+async function getSummaryItems(feedIds: string[], days: number) {
+    if (!feedIds.length) {
+        return [];
+    }
+
+    const sinceMs = Date.now() - days * 24 * 60 * 60 * 1000;
+    const result = await getPool().query(
+        `
+            SELECT *
+            FROM reader_items
+            WHERE feed_id = ANY($1::text[])
+                AND pub_date_ms >= $2
+            ORDER BY pub_date_ms DESC, id DESC
+            LIMIT 200
+        `,
+        [feedIds, sinceMs]
+    );
+    return result.rows.map((row) => rowToItem(row));
+}
+
+async function buildAiSummaryResponse(feedIds: string[], days: number) {
+    const items = await getSummaryItems(feedIds, days);
+    const prompt = buildSummaryPrompt(items, days);
+    const aiResult = items.length
+        ? await requestAiSummary(prompt)
+        : {
+              configured: Boolean((process.env.READER_AI_API_KEY || process.env.OPENAI_API_KEY) && process.env.READER_AI_MODEL),
+              message: '',
+              summary: '',
+          };
+
+    return {
+        ...aiResult,
+        days,
+        itemCount: items.length,
+        prompt,
+    };
 }
 
 function getAiRequestUrl() {
@@ -270,7 +336,7 @@ app.get('/items', async (ctx) => {
     const rows = result.rows.slice(0, limit);
     return ctx.json({
         hasMore: result.rows.length > limit,
-        items: rows.map(rowToItem),
+        items: rows.map((row) => rowToItem(row)),
     });
 });
 
@@ -313,6 +379,20 @@ app.get('/items/counts', async (ctx) => {
         counts.all += row.count;
     }
     return ctx.json(counts);
+});
+
+app.get('/feeds/unread-counts', async (ctx) => {
+    const result = await getPool().query(
+        `
+            SELECT feed_id, COUNT(*)::int AS count
+            FROM reader_items
+            WHERE is_read = FALSE
+            GROUP BY feed_id
+        `
+    );
+    return ctx.json({
+        counts: Object.fromEntries(result.rows.map((row) => [row.feed_id, row.count])),
+    });
 });
 
 app.patch('/items/read-all', async (ctx) => {
@@ -410,34 +490,63 @@ app.patch('/items/:id', async (ctx) => {
 app.post('/feeds/:feedId/ai-summary', async (ctx) => {
     const body = await ctx.req.json();
     const days = normalizeSummaryDays(body.days);
-    const sinceMs = Date.now() - days * 24 * 60 * 60 * 1000;
+    const result = await buildAiSummaryResponse([ctx.req.param('feedId')], days);
+
+    return ctx.json(result);
+});
+
+app.post('/feeds/ai-summary', async (ctx) => {
+    const body = await ctx.req.json();
+    const days = normalizeSummaryDays(body.days);
+    const feedIds = normalizeSummaryFeedIds(body.feedIds);
+    const result = await buildAiSummaryResponse(feedIds, days);
+
+    return ctx.json(result);
+});
+
+app.post('/discord-author-roles/lookup', async (ctx) => {
+    const body = await ctx.req.json();
+    const guildId = String(body.guildId || '').trim();
+    const authors = normalizeDiscordAuthors(body.authors);
+    if (!guildId || !authors.length) {
+        return ctx.json({ roles: {} });
+    }
+
     const result = await getPool().query(
         `
-            SELECT *
-            FROM reader_items
-            WHERE feed_id = $1
-                AND pub_date_ms >= $2
-            ORDER BY pub_date_ms DESC, id DESC
-            LIMIT 200
+            SELECT author, role
+            FROM reader_discord_author_roles
+            WHERE guild_id = $1
+                AND author = ANY($2::text[])
         `,
-        [ctx.req.param('feedId'), sinceMs]
+        [guildId, authors]
     );
-    const items = result.rows.map((row) => rowToItem(row));
-    const prompt = buildSummaryPrompt(items, days);
-    const aiResult = items.length
-        ? await requestAiSummary(prompt)
-        : {
-              configured: Boolean((process.env.READER_AI_API_KEY || process.env.OPENAI_API_KEY) && process.env.READER_AI_MODEL),
-              message: '',
-              summary: '',
-          };
-
     return ctx.json({
-        ...aiResult,
-        days,
-        itemCount: items.length,
-        prompt,
+        roles: Object.fromEntries(result.rows.map((row) => [row.author, normalizeDiscordRole(row.role)])),
     });
+});
+
+app.put('/discord-author-roles', async (ctx) => {
+    const body = await ctx.req.json();
+    const guildId = String(body.guildId || '').trim();
+    const author = String(body.author || '').trim();
+    const role = normalizeDiscordRole(body.role);
+    if (!guildId || !author) {
+        return ctx.json({ error: 'guildId and author are required.' }, 400);
+    }
+
+    const result = await getPool().query(
+        `
+            INSERT INTO reader_discord_author_roles (guild_id, author, role)
+            VALUES ($1, $2, $3)
+            ON CONFLICT (guild_id, author) DO UPDATE SET
+                role = EXCLUDED.role,
+                updated_at = NOW()
+            RETURNING author, role
+        `,
+        [guildId, author, role]
+    );
+    return ctx.json(result.rows[0]);
 });
 
 app.patch('/feeds/:feedId/category', async (ctx) => {
