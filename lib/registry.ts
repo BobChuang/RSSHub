@@ -14,6 +14,7 @@ import type { APIRoute, Namespace, Route } from '@/types';
 import { directoryImport } from '@/utils/directory-import';
 import { isWorker } from '@/utils/is-worker';
 import logger from '@/utils/logger';
+import { readerHtml } from '@/views/reader';
 
 const __dirname = import.meta.dirname;
 
@@ -298,6 +299,11 @@ for (const namespace of namespacesByDepth) {
 }
 
 app.get('/', index);
+app.get('/reader', (ctx) => {
+    ctx.header('Cache-Control', 'no-cache');
+
+    return ctx.html(readerHtml);
+});
 app.get('/healthz', healthz);
 app.get('/robots.txt', robotstxt);
 if (config.debugInfo !== 'false') {

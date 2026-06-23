@@ -1,0 +1,163 @@
+export const readerHtml = String.raw`<!doctype html>
+<html lang="en">
+    <head>
+        <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <title>RSSHub Reader</title>
+        <link rel="icon" href="/favicon.png">
+        <link rel="stylesheet" href="/reader/app.css?v=category-chat">
+        <script type="module" src="/reader/app.js?v=category-chat"></script>
+    </head>
+    <body>
+        <main class="app-shell">
+            <aside class="sidebar">
+                <header class="brand">
+                    <a class="brand-mark" href="/" aria-label="RSSHub home">
+                        <img src="/logo.svg" alt="">
+                    </a>
+                    <div>
+                        <h1>RSSHub Reader</h1>
+                        <p id="readerStatus">Ready</p>
+                    </div>
+                    <div class="brand-actions">
+                        <label class="refresh-menu" for="globalIntervalSelect">
+                            <span>Refresh</span>
+                            <select id="globalIntervalSelect" aria-label="Global auto refresh">
+                                <option value="on">ON</option>
+                                <option value="off">OFF</option>
+                            </select>
+                        </label>
+                        <button id="openAddFeedButton" class="round-button" type="button" title="Add feed" aria-label="Add feed">+</button>
+                    </div>
+                </header>
+
+                <nav class="category-nav" aria-label="Categories">
+                    <button class="category-button active" type="button" data-category="all">
+                        <span>全部</span>
+                        <strong data-category-count="all">0</strong>
+                    </button>
+                    <button class="category-button" type="button" data-category="articles">
+                        <span>文章</span>
+                        <strong data-category-count="articles">0</strong>
+                    </button>
+                    <button class="category-button" type="button" data-category="social">
+                        <span>社媒</span>
+                        <strong data-category-count="social">0</strong>
+                    </button>
+                    <button class="category-button" type="button" data-category="chat">
+                        <span>聊天</span>
+                        <strong data-category-count="chat">0</strong>
+                    </button>
+                    <button class="category-button" type="button" data-category="videos">
+                        <span>视频</span>
+                        <strong data-category-count="videos">0</strong>
+                    </button>
+                    <button class="category-button" type="button" data-category="notifications">
+                        <span>通知</span>
+                        <strong data-category-count="notifications">0</strong>
+                    </button>
+                </nav>
+
+                <div class="source-list" id="sourceList" aria-label="Feed sources"></div>
+            </aside>
+
+            <section class="article-column">
+                <div class="article-toolbar">
+                    <div class="search-wrap">
+                        <input id="searchInput" type="search" autocomplete="off" placeholder="Search articles">
+                    </div>
+                    <div class="read-filter" aria-label="Read status">
+                        <button class="read-filter-button active" type="button" data-read-filter="all">All</button>
+                        <button class="read-filter-button" type="button" data-read-filter="unread">Unread</button>
+                    </div>
+                    <div class="toolbar-actions">
+                        <button id="refreshButton" class="toolbar-button icon-toolbar-button" type="button" title="Refresh now" aria-label="Refresh now">↻</button>
+                        <button id="markAllReadButton" class="toolbar-button icon-toolbar-button" type="button" title="Mark current list as read" aria-label="Mark current list as read">✓✓</button>
+                    </div>
+                </div>
+                <div class="article-list" id="articleList"></div>
+            </section>
+
+            <article class="reader-pane" id="readerPane">
+                <div class="empty-pane">
+                    <h2>No article selected</h2>
+                    <p>Add a feed or choose an article from the list.</p>
+                </div>
+            </article>
+        </main>
+
+        <div id="addFeedModal" class="modal" hidden>
+            <form id="addFeedForm" class="modal-card">
+                <header class="modal-header">
+                    <h2 id="feedModalTitle">添加订阅</h2>
+                    <button id="closeAddFeedButton" class="round-button" type="button" aria-label="Close">X</button>
+                </header>
+                <label class="modal-field" for="feedUrlInput">
+                    <span>RSS 链接或 route</span>
+                    <input id="feedUrlInput" type="text" autocomplete="off" spellcheck="false" placeholder="https://rsshub.app/github/trending/daily/javascript">
+                </label>
+                <label class="modal-field" for="feedGroupInput">
+                    <span>分组</span>
+                    <input id="feedGroupInput" type="text" autocomplete="off" placeholder="可选">
+                </label>
+                <div class="modal-grid">
+                    <label class="modal-field" for="feedCategoryInput">
+                        <span>分类</span>
+                        <select id="feedCategoryInput">
+                            <option value="articles">文章</option>
+                            <option value="social">社媒</option>
+                            <option value="chat">聊天</option>
+                            <option value="videos">视频</option>
+                            <option value="notifications">通知</option>
+                        </select>
+                    </label>
+                    <label class="modal-field" for="feedIntervalInput">
+                        <span>Refresh</span>
+                        <select id="feedIntervalInput">
+                            <option value="1">1 分钟</option>
+                            <option value="3">3 分钟</option>
+                            <option value="5">5 分钟</option>
+                            <option value="10">10 分钟</option>
+                            <option value="30">30 分钟</option>
+                        </select>
+                    </label>
+                </div>
+                <footer class="modal-actions">
+                    <button id="deleteFeedButton" class="danger-icon-button" type="button" title="Delete feed" aria-label="Delete feed" hidden>🗑</button>
+                    <div class="modal-action-group">
+                        <button id="cancelAddFeedButton" class="secondary-button" type="button">Cancel</button>
+                        <button id="addFeedButton" class="primary-button" type="submit">Add</button>
+                    </div>
+                </footer>
+            </form>
+        </div>
+
+        <div id="aiSummaryModal" class="modal" hidden>
+            <form id="aiSummaryForm" class="modal-card">
+                <header class="modal-header">
+                    <div>
+                        <h2>AI 总结</h2>
+                        <p id="aiSummaryFeedTitle" class="modal-subtitle"></p>
+                    </div>
+                    <button id="closeAiSummaryButton" class="round-button" type="button" aria-label="Close">X</button>
+                </header>
+                <label class="modal-field" for="aiSummaryRangeInput">
+                    <span>总结范围</span>
+                    <select id="aiSummaryRangeInput">
+                        <option value="1">最近 1 天</option>
+                        <option value="7">最近 7 天</option>
+                    </select>
+                </label>
+                <div id="aiSummaryResult" class="ai-summary-result" aria-live="polite">
+                    选择范围后生成该订阅源的摘要。
+                </div>
+                <footer class="modal-actions">
+                    <div class="modal-action-group">
+                        <button id="cancelAiSummaryButton" class="secondary-button" type="button">Cancel</button>
+                        <button id="runAiSummaryButton" class="primary-button" type="submit">生成总结</button>
+                    </div>
+                </footer>
+            </form>
+        </div>
+    </body>
+</html>`;
