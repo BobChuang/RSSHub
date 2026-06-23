@@ -9,6 +9,18 @@ describe('index', () => {
         expect(res.status).toBe(200);
         expect(await res.text()).toContain('Welcome to RSSHub!');
     });
+
+    it('serve reader', async () => {
+        const res = await app.request('/reader');
+        expect(res.status).toBe(200);
+        expect(await res.text()).toContain('RSSHub Reader');
+    });
+
+    it('serve reader assets', async () => {
+        const res = await app.request('/reader/app.js');
+        expect(res.status).toBe(200);
+        expect(await res.text()).toContain('rsshub-reader-state-v1');
+    });
 });
 
 describe('request-rewriter', () => {
