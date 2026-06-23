@@ -1,6 +1,14 @@
 import crypto from 'node:crypto';
 
-import type { RESTGetAPIChannelMessagesQuery, RESTGetAPIChannelMessagesResult, RESTGetAPIChannelResult, RESTGetAPIGuildChannelsResult, RESTGetAPIGuildResult } from 'discord-api-types/rest/v10';
+import type {
+    RESTGetAPIChannelMessagesQuery,
+    RESTGetAPIChannelMessagesResult,
+    RESTGetAPIChannelResult,
+    RESTGetAPIGuildChannelsResult,
+    RESTGetAPIGuildMemberResult,
+    RESTGetAPIGuildResult,
+    RESTGetAPIGuildRolesResult,
+} from 'discord-api-types/rest/v10';
 import type { APIMessage } from 'discord-api-types/v10';
 
 import { config } from '@/config';
@@ -29,6 +37,24 @@ export const getGuildChannels = (guildId, authorization) =>
             },
         })
     ) as Promise<RESTGetAPIGuildChannelsResult>;
+
+export const getGuildRoles = (guildId: string, authorization: string) =>
+    cache.tryGet(`discord:guilds:${guildId}:roles`, () =>
+        ofetch(`${apiUrl}/guilds/${guildId}/roles`, {
+            headers: {
+                authorization,
+            },
+        })
+    ) as Promise<RESTGetAPIGuildRolesResult>;
+
+export const getGuildMember = (guildId: string, userId: string, authorization: string) =>
+    cache.tryGet(`discord:guilds:${guildId}:members:${userId}`, () =>
+        ofetch(`${apiUrl}/guilds/${guildId}/members/${userId}`, {
+            headers: {
+                authorization,
+            },
+        })
+    ) as Promise<RESTGetAPIGuildMemberResult>;
 
 export const getChannel = (channelId, authorization) =>
     cache.tryGet(`discord:channels:${channelId}`, () =>
