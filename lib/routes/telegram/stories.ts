@@ -8,6 +8,7 @@ import type { Data, DataItem, Route } from '@/types';
 
 import { getGeoLink, getMediaLink } from './tglib/channel';
 import { getClient, getStory, unwrapMedia } from './tglib/client';
+import { withTelegramRateLimit } from './tglib/rate-limit';
 
 export const route: Route = {
     path: '/stories/:username/:story?',
@@ -90,14 +91,14 @@ export default async function handler(ctx: Context) {
     if (!username) {
         throw new NotFoundError();
     }
-    const peer = await c.getInputEntity(username);
+    const peer = await withTelegramRateLimit(() => c.getInputEntity(username));
     if (story) {
         const storyItem = await getStory(peer, Number(story));
         await configureMiddlewares(ctx);
         return await handleMedia(storyItem.media, c, ctx);
     }
 
-    const storiesRes = await c.invoke(new Api.stories.GetPeerStories({ peer }));
+    const storiesRes = await withTelegramRateLimit(() => c.invoke(new Api.stories.GetPeerStories({ peer })));
 
     const item: DataItem[] = [];
     for (const story of storiesRes.stories.stories) {

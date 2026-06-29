@@ -1,69 +1,9 @@
 import { Hono } from 'hono';
-import { Pool } from 'pg';
 
-const databaseUrl = process.env.READER_DATABASE_URL || process.env.DATABASE_URL;
-
-const pool = databaseUrl
-    ? new Pool({
-          connectionString: databaseUrl,
-      })
-    : null;
+import { refreshFeed } from './reader/scheduler';
+import { createFeedId, deleteFeed, deleteFeedItems, ensureSchema, getPool, listFeeds, rowToItem, updateFeed, updateFeedItemsCategory, upsertFeed, upsertItems } from './reader/store';
 
 const app = new Hono();
-
-let schemaReady: Promise<void> | undefined;
-
-function getPool() {
-    if (!pool) {
-        throw new Error('READER_DATABASE_URL or DATABASE_URL is required for the reader Postgres store.');
-    }
-    return pool;
-}
-
-async function ensureSchema() {
-    if (!schemaReady) {
-        schemaReady = (async () => {
-            await getPool().query(`
-            CREATE TABLE IF NOT EXISTS reader_items (
-                id TEXT PRIMARY KEY,
-                feed_id TEXT NOT NULL,
-                category TEXT NOT NULL,
-                title TEXT NOT NULL,
-                link TEXT NOT NULL,
-                author TEXT,
-                pub_date TEXT,
-                pub_date_ms BIGINT NOT NULL DEFAULT 0,
-                description TEXT,
-                summary TEXT,
-                categories JSONB NOT NULL DEFAULT '[]'::jsonb,
-                is_read BOOLEAN NOT NULL DEFAULT FALSE,
-                is_starred BOOLEAN NOT NULL DEFAULT FALSE,
-                search_text TEXT NOT NULL DEFAULT '',
-                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-            );
-
-            CREATE TABLE IF NOT EXISTS reader_discord_author_roles (
-                guild_id TEXT NOT NULL,
-                author TEXT NOT NULL,
-                role TEXT NOT NULL,
-                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                PRIMARY KEY (guild_id, author)
-            );
-
-            CREATE INDEX IF NOT EXISTS reader_items_pub_date_ms_idx ON reader_items (pub_date_ms DESC);
-            CREATE INDEX IF NOT EXISTS reader_items_feed_pub_date_idx ON reader_items (feed_id, pub_date_ms DESC);
-            CREATE INDEX IF NOT EXISTS reader_items_category_pub_date_idx ON reader_items (category, pub_date_ms DESC);
-            CREATE INDEX IF NOT EXISTS reader_items_unread_category_idx ON reader_items (is_read, category);
-            CREATE INDEX IF NOT EXISTS reader_items_search_idx ON reader_items USING gin (to_tsvector('simple', search_text));
-
-            UPDATE reader_items
-            SET category = 'chat', updated_at = NOW()
-            WHERE category = 'images';
-        `);
-        })();
-    }
-    await schemaReady;
-}
 
 function normalizeLimit(value: string | undefined) {
     const limit = Number(value);
@@ -102,45 +42,6 @@ function normalizeDiscordAuthors(value: unknown) {
         return [];
     }
     return [...new Set(value.map((author) => String(author || '').trim()).filter(Boolean))].slice(0, 200);
-}
-
-function rowToItem(row) {
-    return {
-        id: row.id,
-        feedId: row.feed_id,
-        category: row.category,
-        title: row.title,
-        link: row.link,
-        author: row.author || '',
-        pubDate: row.pub_date || '',
-        pubDateMs: Number(row.pub_date_ms) || 0,
-        description: row.description || '',
-        summary: row.summary || '',
-        categories: row.categories || [],
-        isRead: row.is_read,
-        isStarred: row.is_starred,
-        searchText: row.search_text || '',
-    };
-}
-
-function itemToValues(item) {
-    const categories = Array.isArray(item.categories) ? item.categories : [];
-    return [
-        item.id,
-        item.feedId,
-        item.category,
-        item.title || item.link || 'Untitled',
-        item.link || item.id,
-        item.author || '',
-        item.pubDate || '',
-        Number(item.pubDateMs) || 0,
-        item.description || '',
-        item.summary || '',
-        JSON.stringify(categories),
-        Boolean(item.isRead),
-        Boolean(item.isStarred),
-        item.searchText || [item.title, item.summary, item.author, ...categories].join(' ').toLowerCase(),
-    ];
 }
 
 function stripHtml(value: string) {
@@ -303,6 +204,51 @@ function getItemFilters(ctx, options: { unreadOnly?: boolean } = {}) {
     return { values, where };
 }
 
+function getRefreshSeconds(value: unknown) {
+    const seconds = Number(value);
+    if (!Number.isFinite(seconds)) {
+        return 300;
+    }
+    return Math.min(Math.max(Math.trunc(seconds), 30), 24 * 60 * 60);
+}
+
+function normalizeBodyFeedUrl(value: unknown, requestUrl: string) {
+    const url = String(value || '').trim();
+    if (!url) {
+        return '';
+    }
+    if (url.startsWith('http://') || url.startsWith('https://')) {
+        return new URL(url).href;
+    }
+    return new URL(url.startsWith('/') ? url : `/${url}`, new URL(requestUrl).origin).href;
+}
+
+function feedBodyToInput(body, requestUrl?: string) {
+    const url = requestUrl && body.url ? normalizeBodyFeedUrl(body.url, requestUrl) : body.url;
+    const refreshSeconds = body.refreshSeconds ?? (body.refreshMinutes ? Number(body.refreshMinutes) * 60 : undefined);
+    return {
+        id: body.id || (url ? createFeedId(url) : undefined),
+        url,
+        title: body.title,
+        homeUrl: body.homeUrl,
+        category: body.category,
+        group: body.group,
+        refreshSeconds: refreshSeconds === undefined ? undefined : getRefreshSeconds(refreshSeconds),
+        serverSyncEnabled: typeof body.serverSyncEnabled === 'boolean' ? body.serverSyncEnabled : undefined,
+        paused: typeof body.paused === 'boolean' ? body.paused : undefined,
+        lastFetchedAt: body.lastFetchedAt,
+        nextFetchAt: body.nextFetchAt,
+        lastError: body.lastError,
+    };
+}
+
+function patchNextFetchAt(patch) {
+    if (patch.refreshSeconds !== undefined && patch.nextFetchAt === undefined) {
+        patch.nextFetchAt = new Date(Date.now() + patch.refreshSeconds * 1000).toISOString();
+    }
+    return patch;
+}
+
 app.use('*', async (ctx, next) => {
     try {
         await ensureSchema();
@@ -395,6 +341,69 @@ app.get('/feeds/unread-counts', async (ctx) => {
     });
 });
 
+app.get('/feeds', async (ctx) => ctx.json({ feeds: await listFeeds() }));
+
+app.post('/feeds', async (ctx) => {
+    const body = await ctx.req.json();
+    if (!body.url) {
+        return ctx.json({ error: 'url is required.' }, 400);
+    }
+    const feed = await upsertFeed({
+        ...feedBodyToInput(body, ctx.req.url),
+        serverSyncEnabled: typeof body.serverSyncEnabled === 'boolean' ? body.serverSyncEnabled : true,
+    });
+    return ctx.json(feed);
+});
+
+app.patch('/feeds/bulk', async (ctx) => {
+    const body = await ctx.req.json();
+    const feedIds = Array.isArray(body.feedIds) ? body.feedIds.map((feedId) => String(feedId || '').trim()).filter(Boolean) : [];
+    if (!feedIds.length) {
+        return ctx.json({ count: 0, feeds: [] });
+    }
+    const patch = patchNextFetchAt(feedBodyToInput(body, ctx.req.url));
+    const feeds = (
+        await Promise.all(
+            feedIds.map((feedId) =>
+                updateFeed(feedId, {
+                    category: patch.category,
+                    group: patch.group,
+                    nextFetchAt: patch.nextFetchAt,
+                    refreshSeconds: patch.refreshSeconds,
+                    serverSyncEnabled: patch.serverSyncEnabled,
+                    paused: patch.paused,
+                })
+            )
+        )
+    ).filter(Boolean);
+    return ctx.json({ count: feeds.length, feeds });
+});
+
+app.patch('/feeds/:feedId', async (ctx) => {
+    const body = await ctx.req.json();
+    const feed = await updateFeed(ctx.req.param('feedId'), patchNextFetchAt(feedBodyToInput(body, ctx.req.url)));
+    if (!feed) {
+        return ctx.json({ error: 'Feed not found.' }, 404);
+    }
+    if (body.category) {
+        await updateFeedItemsCategory(feed.id, feed.category);
+    }
+    return ctx.json(feed);
+});
+
+app.delete('/feeds/:feedId', async (ctx) => {
+    const deleted = await deleteFeed(ctx.req.param('feedId'));
+    return ctx.json({ ok: deleted });
+});
+
+app.post('/feeds/:feedId/refresh', async (ctx) => {
+    try {
+        return ctx.json(await refreshFeed(ctx.req.param('feedId')));
+    } catch (error) {
+        return ctx.json({ error: error instanceof Error ? error.message : 'Unable to refresh feed.' }, 500);
+    }
+});
+
 app.patch('/items/read-all', async (ctx) => {
     const { values, where } = getItemFilters(ctx, { unreadOnly: true });
     const result = await getPool().query(
@@ -425,49 +434,7 @@ app.post('/items/bulk', async (ctx) => {
         return ctx.json({ count: 0 });
     }
 
-    const client = await getPool().connect();
-    try {
-        await client.query('BEGIN');
-        await Promise.all(
-            items.map((item) =>
-                client.query(
-                    `
-                    INSERT INTO reader_items (
-                        id, feed_id, category, title, link, author, pub_date, pub_date_ms,
-                        description, summary, categories, is_read, is_starred, search_text
-                    )
-                    VALUES (
-                        $1, $2, $3, $4, $5, $6, $7, $8,
-                        $9, $10, $11::jsonb, $12, $13, $14
-                    )
-                    ON CONFLICT (id) DO UPDATE SET
-                        feed_id = EXCLUDED.feed_id,
-                        category = EXCLUDED.category,
-                        title = EXCLUDED.title,
-                        link = EXCLUDED.link,
-                        author = EXCLUDED.author,
-                        pub_date = EXCLUDED.pub_date,
-                        pub_date_ms = EXCLUDED.pub_date_ms,
-                        description = EXCLUDED.description,
-                        summary = EXCLUDED.summary,
-                        categories = EXCLUDED.categories,
-                        is_read = reader_items.is_read OR EXCLUDED.is_read,
-                        is_starred = reader_items.is_starred OR EXCLUDED.is_starred,
-                        search_text = EXCLUDED.search_text,
-                        updated_at = NOW()
-                `,
-                    itemToValues(item)
-                )
-            )
-        );
-        await client.query('COMMIT');
-        return ctx.json({ count: items.length });
-    } catch (error) {
-        await client.query('ROLLBACK');
-        throw error;
-    } finally {
-        client.release();
-    }
+    return ctx.json({ count: await upsertItems(items) });
 });
 
 app.patch('/items/:id', async (ctx) => {
@@ -552,12 +519,13 @@ app.put('/discord-author-roles', async (ctx) => {
 app.patch('/feeds/:feedId/category', async (ctx) => {
     const body = await ctx.req.json();
     const category = body.category;
-    await getPool().query('UPDATE reader_items SET category = $2, updated_at = NOW() WHERE feed_id = $1', [ctx.req.param('feedId'), category]);
+    await updateFeed(ctx.req.param('feedId'), { category });
+    await updateFeedItemsCategory(ctx.req.param('feedId'), category);
     return ctx.json({ ok: true });
 });
 
 app.delete('/feeds/:feedId/items', async (ctx) => {
-    await getPool().query('DELETE FROM reader_items WHERE feed_id = $1', [ctx.req.param('feedId')]);
+    await deleteFeedItems(ctx.req.param('feedId'));
     return ctx.json({ ok: true });
 });
 

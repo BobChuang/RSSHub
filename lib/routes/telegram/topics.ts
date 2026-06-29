@@ -5,6 +5,7 @@ import type { DataItem, Route } from '@/types';
 import { ViewType } from '@/types';
 
 import { getClient } from './tglib/client';
+import { withTelegramRateLimit } from './tglib/rate-limit';
 
 export const route: Route = {
     path: '/topics/:username',
@@ -46,18 +47,20 @@ export const route: Route = {
 async function handler(ctx) {
     const client = await getClient();
     const username = ctx.req.param('username');
-    const peer = await client.getInputEntity(username);
-    const entity = await client.getEntity(peer);
+    const peer = await withTelegramRateLimit(() => client.getInputEntity(username));
+    const entity = await withTelegramRateLimit(() => client.getEntity(peer));
     const origin = new URL(ctx.req.url).origin;
 
-    const response = await client.invoke(
-        new Api.channels.GetForumTopics({
-            channel: peer,
-            offsetDate: 0,
-            offsetId: 0,
-            offsetTopic: 0,
-            limit: 100,
-        })
+    const response = await withTelegramRateLimit(() =>
+        client.invoke(
+            new Api.channels.GetForumTopics({
+                channel: peer,
+                offsetDate: 0,
+                offsetId: 0,
+                offsetTopic: 0,
+                limit: 100,
+            })
+        )
     );
 
     const item: DataItem[] = response.topics

@@ -24,7 +24,7 @@ describe('app-bootstrap', () => {
         const listener = after.find((fn) => !before.has(fn));
 
         expect(listener).toBeDefined();
-        listener?.(new Error('boom'));
+        listener?.(new Error('boom'), 'uncaughtException');
         expect(errorSpy).toHaveBeenCalled();
 
         if (listener) {

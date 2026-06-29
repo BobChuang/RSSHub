@@ -30,6 +30,10 @@ type ConfigEnvKeys =
     | 'REDIS_URL'
     | 'CACHE_HTTP_URL'
     | 'CACHE_HTTP_TOKEN'
+    | 'READER_PERSIST_FETCHED_ITEMS'
+    | 'READER_SCHEDULER_INTERVAL'
+    | 'READER_SCHEDULER_BATCH_SIZE'
+    | 'READER_ROUTE_BASE_URL'
     // Proxy
     | 'PROXY_URI'
     | 'PROXY_URIS'
@@ -201,6 +205,9 @@ type ConfigEnvKeys =
     | 'TELEGRAM_API_ID'
     | 'TELEGRAM_API_HASH'
     | 'TELEGRAM_MAX_CONCURRENT_DOWNLOADS'
+    | 'TELEGRAM_REQUEST_INTERVAL'
+    | 'TELEGRAM_RATE_LIMIT_QUEUE_SIZE'
+    | 'TELEGRAM_RATE_LIMIT_BACKEND'
     | 'TELEGRAM_PROXY_HOST'
     | 'TELEGRAM_PROXY_PORT'
     | 'TELEGRAM_PROXY_SECRET'
@@ -291,6 +298,12 @@ export type Config = {
     httpCache: {
         url?: string;
         token?: string;
+    };
+    reader: {
+        persistFetchedItems: boolean;
+        schedulerInterval: number;
+        schedulerBatchSize: number;
+        routeBaseUrl?: string;
     };
     // proxy
     proxyUri?: string;
@@ -620,6 +633,9 @@ export type Config = {
         apiId?: number;
         apiHash?: string;
         maxConcurrentDownloads?: number;
+        requestInterval?: number;
+        rateLimitQueueSize?: number;
+        rateLimitBackend?: string;
         proxy?: {
             host?: string;
             port?: number;
@@ -788,6 +804,12 @@ const calculateValue = () => {
         httpCache: {
             url: envs.CACHE_HTTP_URL,
             token: envs.CACHE_HTTP_TOKEN,
+        },
+        reader: {
+            persistFetchedItems: toBoolean(envs.READER_PERSIST_FETCHED_ITEMS, true),
+            schedulerInterval: toInt(envs.READER_SCHEDULER_INTERVAL, 15),
+            schedulerBatchSize: toInt(envs.READER_SCHEDULER_BATCH_SIZE, 5),
+            routeBaseUrl: envs.READER_ROUTE_BASE_URL,
         },
         // proxy
         proxyUri: envs.PROXY_URI,
@@ -1122,6 +1144,9 @@ const calculateValue = () => {
             apiId: envs.TELEGRAM_API_ID,
             apiHash: envs.TELEGRAM_API_HASH,
             maxConcurrentDownloads: envs.TELEGRAM_MAX_CONCURRENT_DOWNLOADS,
+            requestInterval: toInt(envs.TELEGRAM_REQUEST_INTERVAL, 0),
+            rateLimitQueueSize: toInt(envs.TELEGRAM_RATE_LIMIT_QUEUE_SIZE, 1000),
+            rateLimitBackend: envs.TELEGRAM_RATE_LIMIT_BACKEND || 'auto',
             proxy: {
                 host: envs.TELEGRAM_PROXY_HOST,
                 port: envs.TELEGRAM_PROXY_PORT,

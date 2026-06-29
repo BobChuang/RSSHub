@@ -5,6 +5,8 @@ import { StringSession } from 'telegram/sessions/index.js';
 import { config } from '@/config';
 import ConfigNotFoundError from '@/errors/types/config-not-found';
 
+import { withTelegramRateLimit } from './rate-limit';
+
 let client: TelegramClient | undefined;
 export async function getClient(authParams?: UserAuthParams, session?: string) {
     if (!config.telegram.session && session === undefined) {
@@ -33,12 +35,16 @@ export async function getClient(authParams?: UserAuthParams, session?: string) {
                 : undefined,
     });
 
-    await client.start(
-        Object.assign(authParams ?? {}, {
-            onError: (err: Error) => {
-                throw new Error('Cannot start TG: ' + err);
-            },
-        }) as any
+    await withTelegramRateLimit(
+        () =>
+            client!.start(
+                Object.assign(authParams ?? {}, {
+                    onError: (err: Error) => {
+                        throw new Error('Cannot start TG: ' + err);
+                    },
+                }) as any
+            ),
+        session
     );
     return client;
 }
@@ -64,13 +70,14 @@ export function getDocument(m: Api.TypeMessageMedia) {
 }
 
 export async function getStory(entity: Api.TypeEntityLike, id: number) {
-    const result = await (
-        await getClient()
-    ).invoke(
-        new Api.stories.GetStoriesByID({
-            id: [id],
-            peer: entity,
-        })
+    const client = await getClient();
+    const result = await withTelegramRateLimit(() =>
+        client.invoke(
+            new Api.stories.GetStoriesByID({
+                id: [id],
+                peer: entity,
+            })
+        )
     );
     return result.stories[0] as Api.StoryItem;
 }

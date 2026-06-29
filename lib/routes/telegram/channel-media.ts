@@ -12,6 +12,7 @@ import type { Route } from '@/types';
 import cacheModule from '@/utils/cache/index';
 
 import { getClient, getDocument, getFilename, unwrapMedia } from './tglib/client';
+import { withTelegramRateLimit } from './tglib/rate-limit';
 
 /**
  * https://core.telegram.org/api/files#stripped-thumbnails
@@ -107,7 +108,7 @@ export async function* streamDocument(client: TelegramClient, obj: Api.Document,
         iterFileParams.limit = limit.valueOf();
     }
     // console.log('starting iterDownload');
-    const stream = client.iterDownload(iterFileParams);
+    const stream = await withTelegramRateLimit(() => client.iterDownload(iterFileParams));
     yield* stream;
     await stream.close();
 }
@@ -193,8 +194,8 @@ Serves telegram media like pictures, video or files.
 
 export async function handleMedia(media: Api.TypeMessageMedia, client: TelegramClient, ctx: Context) {
     if (media instanceof Api.MessageMediaPhoto) {
-        const buf = await client.downloadMedia(media);
-        return new Response(buf, { headers: { 'Content-Type': 'image/jpeg' } });
+        const buf = await withTelegramRateLimit(() => client.downloadMedia(media));
+        return new Response(buf as BodyInit, { headers: { 'Content-Type': 'image/jpeg' } });
     }
 
     const doc = getDocument(media);
@@ -236,10 +237,12 @@ export default async function handler(ctx: Context) {
     const client = await getClient();
 
     const { entityName, messageId } = ctx.req.param();
-    const entity = await client.getInputEntity(entityName);
-    const msgs = await client.getMessages(entity, {
-        ids: [Number(messageId)],
-    });
+    const entity = await withTelegramRateLimit(() => client.getInputEntity(entityName));
+    const msgs = await withTelegramRateLimit(() =>
+        client.getMessages(entity, {
+            ids: [Number(messageId)],
+        })
+    );
     const media = await unwrapMedia(msgs[0]?.media);
     if (!media) {
         return ctx.text('Unknown media', 404);

@@ -5,18 +5,19 @@ import { HTMLParser } from 'telegram/extensions/html.js';
 import { returnBigInt } from 'telegram/Helpers.js';
 import { getDisplayName } from 'telegram/Utils.js';
 
-import type { Data, DataItem } from '@/types';
+import type { DataItem } from '@/types';
 import cache from '@/utils/cache';
 
 import { getClient, getDocument, getFilename, unwrapMedia } from './client';
+import { withTelegramRateLimit } from './rate-limit';
 
 export function getGeoLink(geo: Api.GeoPoint) {
     return `<a href="https://www.google.com/maps/search/?api=1&query=${geo.lat}%2C${geo.long}" target="_blank">Geo LatLon: ${geo.lat}, ${geo.long}</a>`;
 }
 
 export async function getPollResults(client, message, m: Api.MessageMediaPoll) {
-    const resultsUpdateResponse = await client.invoke(new Api.messages.GetPollResults({ peer: message.peerId, msgId: message.id }));
-    let results: Api.PollResults;
+    const resultsUpdateResponse = await withTelegramRateLimit<any>(() => client.invoke(new Api.messages.GetPollResults({ peer: message.peerId, msgId: message.id })));
+    let results = new Api.PollResults({});
     if (resultsUpdateResponse?.updates[0] instanceof Api.UpdateMessagePoll) {
         results = resultsUpdateResponse.updates[0].results as Api.PollResults;
     }
@@ -140,17 +141,17 @@ export async function getTelegramChannel(ctx: Context, username: string, options
 
     let peerCache = await cache.get(`telegram:inputEntity:${username}`);
     if (!peerCache) {
-        const p = await client.getInputEntity(username);
+        const p = await withTelegramRateLimit(() => client.getInputEntity(username));
         peerCache = JSON.stringify(p.toJSON());
         await cache.set(`telegram:inputEntity:${username}`, peerCache);
     }
     const peerData = JSON.parse(peerCache, (k, v) => (k === 'channelId' || k === 'accessHash' ? returnBigInt(v) : v));
     const peer = new Api.InputPeerChannel(peerData);
 
-    const entity = await client.getEntity(peer);
+    const entity = await withTelegramRateLimit(() => client.getEntity(peer));
 
     let attachments: string[] = [];
-    const messages = await client.getMessages(peer, { limit: 50, replyTo: options.replyTo });
+    const messages = await withTelegramRateLimit(() => client.getMessages(peer, { limit: 50, replyTo: options.replyTo }));
 
     let i = 0;
     const item: DataItem[] = [];
@@ -158,13 +159,15 @@ export async function getTelegramChannel(ctx: Context, username: string, options
         let text = message.text; // must not be HTML
 
         if (message.fwdFrom?.fromId) {
-            const fwdFrom = await client.getEntity(message.fwdFrom.fromId);
-            text = `Forwarded From: ${getDisplayName(fwdFrom)}: ${text}`;
+            const fromId = message.fwdFrom.fromId;
+            const fwdFrom = await withTelegramRateLimit(() => client.getEntity(fromId));
+            text = `Forwarded From: ${getDisplayName(fwdFrom as any)}: ${text}`;
         }
         const media = await unwrapMedia(message.media, message.peerId);
-        if (message.media instanceof Api.MessageMediaStory && media) {
+        const messageMedia = message.media;
+        if (messageMedia instanceof Api.MessageMediaStory && media) {
             // if successfully loaded the story
-            const storyFrom = await client.getEntity(message.media.peer);
+            const storyFrom = await withTelegramRateLimit(() => client.getEntity(messageMedia.peer));
             text = `Story From: ${getDisplayName(storyFrom)}: ${text}`;
         }
         if (media) {
@@ -207,14 +210,13 @@ export async function getTelegramChannel(ctx: Context, username: string, options
 
     return {
         title: options.title ?? getDisplayName(entity),
-        language: null,
         link: options.link ?? `https://t.me/${username}`,
         item,
         allowEmpty: ctx.req.param('id') === 'allow_empty',
         description: options.description ?? `@${username} on Telegram`,
-    } as Data;
+    };
 }
 
 export default async function handler(ctx: Context) {
-    return await getTelegramChannel(ctx, ctx.req.param('username'));
+    return await getTelegramChannel(ctx, ctx.req.param('username') || '');
 }

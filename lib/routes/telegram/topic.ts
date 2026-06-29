@@ -7,6 +7,7 @@ import { ViewType } from '@/types';
 
 import { getTelegramChannel } from './tglib/channel';
 import { getClient } from './tglib/client';
+import { withTelegramRateLimit } from './tglib/rate-limit';
 
 export const route: Route = {
     path: '/topic/:username/:topicId',
@@ -76,13 +77,15 @@ async function handler(ctx) {
     }
 
     const client = await getClient();
-    const peer = await client.getInputEntity(username);
-    const entity = await client.getEntity(peer);
-    const response = await client.invoke(
-        new Api.channels.GetForumTopicsByID({
-            channel: peer,
-            topics: [topicId],
-        })
+    const peer = await withTelegramRateLimit(() => client.getInputEntity(username));
+    const entity = await withTelegramRateLimit(() => client.getEntity(peer));
+    const response = await withTelegramRateLimit(() =>
+        client.invoke(
+            new Api.channels.GetForumTopicsByID({
+                channel: peer,
+                topics: [topicId],
+            })
+        )
     );
     const topic = response.topics.find((topic) => topic instanceof Api.ForumTopic);
     if (!(topic instanceof Api.ForumTopic)) {

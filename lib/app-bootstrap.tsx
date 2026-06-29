@@ -4,6 +4,7 @@ import { jsxRenderer } from 'hono/jsx-renderer';
 import { trimTrailingSlash } from 'hono/trailing-slash';
 
 import api from '@/api';
+import { startReaderScheduler } from '@/api/reader/scheduler';
 import { errorHandler, notFoundHandler } from '@/errors';
 import accessControl from '@/middleware/access-control';
 import antiHotlink from '@/middleware/anti-hotlink';
@@ -13,6 +14,7 @@ import header from '@/middleware/header';
 import honeybadger from '@/middleware/honeybadger';
 import mLogger from '@/middleware/logger';
 import parameter from '@/middleware/parameter';
+import readerPersistence from '@/middleware/reader-persistence';
 import sentry from '@/middleware/sentry';
 import template from '@/middleware/template';
 import trace from '@/middleware/trace';
@@ -45,11 +47,14 @@ app.use(header);
 app.use(antiHotlink);
 app.use(parameter);
 app.use(cache);
+app.use(readerPersistence);
 
 app.route('/', registry);
 app.route('/api', api);
 
 app.notFound(notFoundHandler);
 app.onError(errorHandler);
+
+startReaderScheduler();
 
 export default app;

@@ -64,6 +64,7 @@ export const readerHtml = String.raw`<!doctype html>
                     <div id="settingsMenu" class="settings-menu" hidden>
                         <button id="importConfigButton" class="settings-menu-button" type="button">导入配置</button>
                         <button id="exportConfigButton" class="settings-menu-button" type="button">导出配置</button>
+                        <button id="openServerFeedsButton" class="settings-menu-button" type="button">服务端订阅</button>
                     </div>
                     <input id="importConfigInput" type="file" accept="application/json,.json" hidden>
                 </footer>
@@ -138,6 +139,46 @@ export const readerHtml = String.raw`<!doctype html>
                     </div>
                 </footer>
             </form>
+        </div>
+
+        <div id="serverFeedsModal" class="modal" hidden>
+            <section class="modal-card server-feeds-card">
+                <header class="modal-header">
+                    <div>
+                        <h2>服务端订阅</h2>
+                        <p class="modal-subtitle">管理所有由服务器后台同步的链接。</p>
+                    </div>
+                    <button id="closeServerFeedsButton" class="round-button" type="button" aria-label="Close">X</button>
+                </header>
+                <div class="server-feeds-toolbar">
+                    <label class="modal-field compact-field" for="serverFeedsBulkIntervalInput">
+                        <span>批量间隔</span>
+                        <select id="serverFeedsBulkIntervalInput">
+                            <option value="60">1 分钟</option>
+                            <option value="180">3 分钟</option>
+                            <option value="300">5 分钟</option>
+                            <option value="600">10 分钟</option>
+                            <option value="1800">30 分钟</option>
+                        </select>
+                    </label>
+                    <button id="applyServerFeedsBulkIntervalButton" class="secondary-button" type="button">应用到勾选</button>
+                </div>
+                <div class="server-feeds-table-wrap">
+                    <table class="server-feeds-table">
+                        <thead>
+                            <tr>
+                                <th><input id="serverFeedsSelectAllInput" type="checkbox" aria-label="Select all server feeds"></th>
+                                <th>订阅</th>
+                                <th>间隔</th>
+                                <th>状态</th>
+                                <th>时间</th>
+                                <th>操作</th>
+                            </tr>
+                        </thead>
+                        <tbody id="serverFeedsTableBody"></tbody>
+                    </table>
+                </div>
+            </section>
         </div>
 
         <div id="aiSummaryModal" class="modal" hidden>
