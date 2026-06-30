@@ -150,7 +150,8 @@ Due to Telegram restrictions, some channels involving pornography, copyright, an
 };
 
 async function handler(ctx) {
-    const useWeb = ctx.req.param('routeParams') || !config.telegram.session;
+    const forceWeb = ctx.req.query('force_web') === '1';
+    const useWeb = forceWeb || ctx.req.param('routeParams') || !config.telegram.session;
     if (!useWeb) {
         return tglibchannel(ctx);
     }

@@ -9,11 +9,12 @@ let schedulerStarted = false;
 let schedulerRunning = false;
 
 function getFetchUrl(url: string) {
-    if (url.startsWith('http://') || url.startsWith('https://')) {
-        return url;
-    }
     const baseUrl = config.reader.routeBaseUrl || `http://127.0.0.1:${config.connect.port}`;
-    return new URL(url.startsWith('/') ? url : `/${url}`, baseUrl).href;
+    const fetchUrl = url.startsWith('http://') || url.startsWith('https://') ? new URL(url) : new URL(url.startsWith('/') ? url : `/${url}`, baseUrl);
+    if (/\/telegram\/channel\/[^/?#]+/.test(fetchUrl.pathname)) {
+        fetchUrl.searchParams.set('force_web', '1');
+    }
+    return fetchUrl.href;
 }
 
 function getNextFetchAt(feed: ReaderFeed) {

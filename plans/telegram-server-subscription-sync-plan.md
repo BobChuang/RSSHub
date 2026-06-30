@@ -1,6 +1,6 @@
-# Telegram 服务端订阅同步与限速方案
+# Telegram 服务端订阅同步与公开网页抓取方案
 
-日期：2026-06-29
+日期：2026-06-30
 
 ## 目标
 
@@ -8,7 +8,7 @@
 2. 将 reader 的自动刷新从“浏览器前台页面驱动”改成“服务端订阅调度驱动”。
 3. 本地 reader 仍然显示每个频道下次刷新的倒计时，但倒计时来源改为服务端的 `nextFetchAt`。
 4. 在左下角设置菜单中新增一个“服务端订阅”入口，与“导入配置”“导出配置”同级。
-5. 为 Telegram 按 key/session 做统一限速，避免多个频道同时使用同一个 key 导致请求过频。
+5. Telegram 公开频道改为强制使用 `https://t.me/s/:username` 公开网页抓取，不再依赖 `TELEGRAM_SESSION`、`TELEGRAM_API_ID`、`TELEGRAM_API_HASH` 换取或维持用户 session。
 
 ## 当前状态
 
@@ -20,7 +20,8 @@
 - `/telegram/channel/:username` 目前有两种路径：
     - 未配置 `TELEGRAM_SESSION` 或带额外参数时，抓取 `https://t.me/s/:username` 页面。
     - 配置 `TELEGRAM_SESSION` 且基础路由时，走 Telegram API client。
-- Telegram API 调用分散在多个文件里，限速逻辑需要抽成公共模块。
+- 由于本需求不需要历史数据，长期同步不应再走 Telegram API client；公开频道统一使用 `https://t.me/s/:username` 页面抓取。
+- `TELEGRAM_SESSION`、`TELEGRAM_API_ID`、`TELEGRAM_API_HASH` 仅保留给其他明确需要 MTProto 的路由或临时补历史场景，不作为 reader 服务端订阅的默认链路。
 
 ## 总体架构
 
@@ -28,7 +29,7 @@
 
 1. 数据持久化层：统一负责 feed 元数据和 item 入库。
 2. 服务端订阅调度器：定时扫描到期 feed，拉取、入库、更新下次刷新时间。
-3. Telegram key 限速层：所有 Telegram API 请求进入同一个按 key 分组的队列。
+3. Telegram 公开网页抓取层：公开频道统一通过 `https://t.me/s/:username` 获取最新消息，避免用户 session 掉线。
 
 前端从“刷新执行者”改成“状态展示和配置管理者”。
 
@@ -173,6 +174,7 @@ READER_PERSIST_FETCHED_ITEMS=1
 拉取策略：
 
 - 如果 URL 是当前 RSSHub 实例的本地 route，可以通过本机 HTTP 地址请求，复用现有路由、缓存和鉴权逻辑。
+- 如果 URL 是 Telegram 公开频道 route，scheduler 请求本机 route 时必须强制选择公开网页抓取路径，避免因为实例配置了 `TELEGRAM_SESSION` 而自动切到 Telegram API client。
 - 如果 URL 是外部 RSS/Atom/JSON Feed，则由 scheduler 自己解析并入库。
 - 解析后的 item shape 与当前 reader 前端 `parseFeed`/`normalizeParsedItems` 保持一致。
 
@@ -236,62 +238,46 @@ POST /api/reader/feeds/:feedId/refresh
 - `POST /api/reader/feeds/:feedId/refresh`
 - `PATCH /api/reader/feeds/bulk`
 
-## Telegram key 限速方案
+## Telegram 公开网页抓取方案
 
-新增 Telegram 专用限速模块，例如：
+本方案不需要历史数据，因此公开频道不再使用 `app_id + api_hash + session` 的 MTProto 用户会话。
 
-- `lib/routes/telegram/tglib/rate-limit.ts`
+目标行为：
 
-建议配置：
+- `/telegram/channel/:username` 在 reader 服务端订阅场景中始终使用 `https://t.me/s/:username` 公开网页抓取。
+- 即使实例配置了 `TELEGRAM_SESSION`，服务端订阅也不能因为基础路由而自动切到 Telegram API client。
+- 不再新增 Telegram key/session 级别限速；公开网页抓取继续依赖 RSSHub 路由缓存、HTTP 请求限速和 scheduler 的 `refresh_seconds`。
 
-```env
-TELEGRAM_REQUEST_INTERVAL=1
-TELEGRAM_RATE_LIMIT_QUEUE_SIZE=1000
-TELEGRAM_RATE_LIMIT_BACKEND=auto
-```
+建议做法：
 
-含义：
+1. 给 Telegram channel route 增加显式参数，例如 `?mode=web`、`?force_web=1` 或内部 scheduler-only 标记。
+2. scheduler 发现 feed 是 `/telegram/channel/:username` 时，请求本机 route 自动追加该参数。
+3. route 中的分支逻辑调整为：
+    - 显式要求公开网页抓取时，直接走 `https://t.me/s/:username`。
+    - 没有显式要求时，保留现有兼容行为，避免影响已有用户。
+4. reader 服务端订阅只保存普通 feed URL；强制网页抓取参数可以在 scheduler 请求本机 route 时临时追加，避免污染用户看到的订阅链接。
 
-- `TELEGRAM_REQUEST_INTERVAL=1` 表示同一个 Telegram key/session 的请求至少间隔 1 秒。
-- 1 秒内进来的第二个请求不会直接打 Telegram，而是进入队列等待。
-- `auto` 表示有 Redis 就用 Redis 做跨进程限速，没有 Redis 就用内存限速。
+网页抓取限制：
 
-key 身份计算：
-
-- 不记录、不打印原始 `TELEGRAM_SESSION`、`TELEGRAM_API_HASH` 或 token。
-- 使用 hash 后的身份作为 limiter key：
-
-```text
-sha256(apiId + ':' + apiHash + ':' + sessionOrToken)
-```
-
-单进程部署：
-
-- 使用内存队列即可。
-- 每个 Telegram key 一个队列。
-
-多进程或多容器部署：
-
-- 必须使用 Redis-backed limiter。
-- 如果检测到没有 Redis，只能保证当前进程内串行，需要打 warning。
-
-需要包裹的 Telegram API 调用：
-
-- `client.getInputEntity(...)`
-- `client.getEntity(...)`
-- `client.getMessages(...)`
-- `client.invoke(...)`
-- 如果媒体下载也会触发 Telegram API 请求，也要进入同一个 limiter。
+- 只适用于公开频道。
+- 不保证完整历史，只用于持续获取最新可见消息。
+- Telegram 网页 HTML 结构变化时需要维护 parser。
+- 私有频道、群组、forum topic 若没有公开网页入口，不纳入本方案。
 
 重点文件：
 
-- `lib/routes/telegram/tglib/channel.ts`
-- `lib/routes/telegram/topic.ts`
-- `lib/routes/telegram/topics.ts`
-- `lib/routes/telegram/stories.ts`
-- `lib/routes/telegram/channel-media.ts`
+- `lib/routes/telegram/channel.ts` 或当前 `/telegram/channel/:username` route 实现文件。
+- Telegram channel route 内部调用 `https://t.me/s/:username` 的抓取/parser 逻辑。
+- `lib/api/reader/scheduler.ts`：识别 Telegram channel feed 并追加强制网页抓取参数。
 
-`https://t.me/s/...` 网页抓取路径不使用 Telegram key，所以不需要进入这个 key limiter；它继续依赖 RSSHub 路由缓存和全局请求限速。
+保留但不作为本方案主路径：
+
+- `TELEGRAM_SESSION`
+- `TELEGRAM_API_ID`
+- `TELEGRAM_API_HASH`
+- `lib/routes/telegram/tglib/*`
+
+这些配置和模块只服务于其他仍需要 MTProto 的 Telegram route，或未来需要一次性补历史时再单独使用。
 
 ## 实施阶段
 
@@ -323,24 +309,24 @@ sha256(apiId + ':' + apiHash + ':' + sessionOrToken)
 - 弹窗支持列表、修改间隔、暂停、恢复、立即刷新、删除。
 - 倒计时改为使用服务端 `nextFetchAt`。
 
-### 阶段 5：Telegram 限速
+### 阶段 5：Telegram 公开网页抓取
 
-- 加配置项。
-- 先实现内存 limiter。
-- Redis 可用时自动切到 Redis limiter。
-- 包裹所有 Telegram API 调用点。
-- 加测试：两个 Telegram feed 同时刷新时，第二个请求至少晚 `TELEGRAM_REQUEST_INTERVAL` 执行。
+- 在 Telegram channel route 中增加显式强制网页抓取参数或内部标记。
+- 确保强制网页抓取时不会读取或使用 `TELEGRAM_SESSION`。
+- 在 scheduler 请求 Telegram channel feed 时自动追加该参数或标记。
+- 加测试：即使配置了 `TELEGRAM_SESSION`，服务端订阅刷新 `/telegram/channel/:username` 仍走 `https://t.me/s/:username` 路径。
+- 加测试：用户直接访问原 route 时保持现有兼容行为，除非显式传入强制网页抓取参数。
 
 ### 阶段 6：验收
 
 - 使用测试 PostgreSQL 启动服务。
-- 配置同一个 Telegram session。
-- 添加两个 Telegram 服务端订阅。
-- 设置 `TELEGRAM_REQUEST_INTERVAL=1`。
+- 可故意配置一组 `TELEGRAM_SESSION` / `TELEGRAM_API_ID` / `TELEGRAM_API_HASH`，用于验证服务端订阅不会误走 MTProto。
+- 添加两个公开 Telegram channel 服务端订阅。
 - 同时触发两个订阅刷新。
 - 验证：
     - 两个请求最终都完成。
-    - 第二个 Telegram API 请求至少晚 1 秒开始。
+    - 请求路径使用 `https://t.me/s/:username` 公开网页抓取。
+    - 不初始化 Telegram API client，不读取 user session。
     - 两个 feed 的 item 都进入 `reader_items`。
     - `reader_feeds.next_fetch_at` 正确更新。
     - `/reader` 关闭后服务端仍继续刷新。
@@ -349,7 +335,8 @@ sha256(apiId + ':' + apiHash + ':' + sessionOrToken)
 
 - 当前 reader 数据库是实例级共享的。如果实例公开访问，服务端订阅链接和历史条目也可能被别人看到。公开部署前建议增加 `READER_ADMIN_TOKEN` 或其他鉴权。
 - “所有路由结果入库”可能保存带私密参数的 route 内容。自用实例这是合理的，但需要在配置说明中写清楚。
-- 多进程限速必须依赖 Redis；没有 Redis 时只能保证单进程内限速。
+- 公开网页抓取依赖 Telegram Web 页面结构，HTML 改版会导致 parser 失效，需要保留错误记录和告警。
+- 公开网页抓取只覆盖公开频道，不覆盖私有频道、普通群组和没有公开网页的 forum topic。
 - scheduler 通过 HTTP 拉取本机 route 时，要避免循环触发问题。因为 item upsert 是幂等的，可以接受 route persistence 和 scheduler persistence 都执行。
 - 现有缓存仍然有价值。scheduler 默认不应绕过缓存，除非用户点击“立即刷新”并明确需要刷新上游。
 
@@ -362,5 +349,5 @@ sha256(apiId + ':' + apiHash + ':' + sessionOrToken)
 - `/reader` 能显示服务端返回的下次刷新倒计时。
 - 左下角设置菜单包含“服务端订阅”入口。
 - 服务端订阅弹窗可查看所有链接和时间，并可修改刷新间隔。
-- 同一 Telegram key/session 的 API 请求按 `TELEGRAM_REQUEST_INTERVAL` 排队执行。
-- Redis 存在时限速跨进程生效；没有 Redis 时单进程生效并打印提醒。
+- Telegram 公开频道服务端订阅强制走 `https://t.me/s/:username` 公开网页抓取。
+- 即使配置了 `TELEGRAM_SESSION`，公开频道服务端订阅也不会初始化 Telegram API client 或使用用户 session。
