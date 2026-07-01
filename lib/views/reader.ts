@@ -5,8 +5,8 @@ export const readerHtml = String.raw`<!doctype html>
         <meta name="viewport" content="width=device-width, initial-scale=1">
         <title>RSSHub Reader</title>
         <link rel="icon" href="/favicon.png">
-        <link rel="stylesheet" href="/reader/app.css?v=settings-config-menu">
-        <script type="module" src="/reader/app.js?v=settings-config-menu"></script>
+        <link rel="stylesheet" href="/reader/app.css?v=ai-summary-copy-markdown">
+        <script type="module" src="/reader/app.js?v=ai-summary-copy-markdown"></script>
     </head>
     <body>
         <main class="app-shell">
@@ -182,7 +182,7 @@ export const readerHtml = String.raw`<!doctype html>
         </div>
 
         <div id="aiSummaryModal" class="modal" hidden>
-            <form id="aiSummaryForm" class="modal-card">
+            <form id="aiSummaryForm" class="modal-card ai-summary-card">
                 <header class="modal-header">
                     <div>
                         <h2>AI 总结</h2>
@@ -197,8 +197,15 @@ export const readerHtml = String.raw`<!doctype html>
                         <option value="7">最近 7 天</option>
                     </select>
                 </label>
-                <div id="aiSummaryResult" class="ai-summary-result" aria-live="polite">
-                    选择范围后生成该订阅源的摘要。
+                <label class="modal-field" for="aiSummaryPromptInput">
+                    <span>AI 提示词</span>
+                    <textarea id="aiSummaryPromptInput" class="ai-summary-prompt-input" spellcheck="false"></textarea>
+                </label>
+                <div class="ai-summary-result-wrap">
+                    <button id="copyAiSummaryButton" class="ai-summary-copy-button" type="button" title="复制总结" aria-label="复制总结" hidden>⧉</button>
+                    <div id="aiSummaryResult" class="ai-summary-result" aria-live="polite">
+                        选择范围后生成该订阅源的摘要。
+                    </div>
                 </div>
                 <footer class="modal-actions">
                     <div class="modal-action-group">

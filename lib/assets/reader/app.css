@@ -42,7 +42,8 @@ body {
 
 button,
 input,
-select {
+select,
+textarea {
     font: inherit;
 }
 
@@ -51,7 +52,8 @@ button {
 }
 
 input,
-select {
+select,
+textarea {
     width: 100%;
     min-width: 0;
     border: 1px solid var(--line);
@@ -79,12 +81,14 @@ select {
 }
 
 input:focus,
-select:focus {
+select:focus,
+textarea:focus {
     border-color: var(--accent);
     box-shadow: 0 0 0 3px rgb(255 106 42 / 0.16);
 }
 
-input:disabled {
+input:disabled,
+textarea:disabled {
     cursor: not-allowed;
     opacity: 0.62;
 }
@@ -1192,16 +1196,71 @@ a.reader-action {
     background: rgb(255 106 42 / 0.18);
 }
 
+#aiSummaryModal {
+    padding-top: 3vh;
+}
+
+.ai-summary-card {
+    width: min(900px, 100%);
+    max-height: 94vh;
+    overflow: auto;
+}
+
+.ai-summary-prompt-input {
+    min-height: 210px;
+    resize: vertical;
+    color: var(--ink);
+    font:
+        13px/1.55 ui-monospace,
+        SFMono-Regular,
+        Menlo,
+        Consolas,
+        monospace;
+    white-space: pre-wrap;
+}
+
+.ai-summary-result-wrap {
+    position: relative;
+    min-height: 0;
+}
+
+.ai-summary-copy-button {
+    position: absolute;
+    top: 10px;
+    right: 10px;
+    z-index: 1;
+    display: grid;
+    width: 34px;
+    height: 34px;
+    place-items: center;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    background: #202325;
+    color: var(--muted);
+    font-size: 18px;
+    line-height: 1;
+}
+
+.ai-summary-copy-button[hidden] {
+    display: none;
+}
+
+.ai-summary-copy-button:hover {
+    border-color: rgb(255 106 42 / 0.52);
+    background: rgb(255 106 42 / 0.14);
+    color: var(--ink);
+}
+
 .ai-summary-result {
     display: grid;
-    min-height: 160px;
-    max-height: 46vh;
+    min-height: 360px;
+    max-height: 52vh;
     overflow: auto;
     gap: 12px;
     border: 1px solid var(--line);
     border-radius: 8px;
     background: #17191b;
-    padding: 14px;
+    padding: 16px 54px 18px 16px;
 }
 
 .ai-summary-meta,
@@ -1225,16 +1284,94 @@ a.reader-action {
     white-space: pre-wrap;
 }
 
-.ai-summary-prompt {
-    min-height: 240px;
-    resize: vertical;
+.ai-summary-markdown {
     color: var(--ink);
+    font-size: 14px;
+    line-height: 1.65;
+    overflow-wrap: anywhere;
+}
+
+.ai-summary-markdown > :first-child {
+    margin-top: 0;
+}
+
+.ai-summary-markdown > :last-child {
+    margin-bottom: 0;
+}
+
+.ai-summary-markdown h1,
+.ai-summary-markdown h2,
+.ai-summary-markdown h3,
+.ai-summary-markdown h4 {
+    margin: 18px 0 8px;
+    color: #ffffff;
+    line-height: 1.28;
+}
+
+.ai-summary-markdown h1 {
+    font-size: 22px;
+}
+
+.ai-summary-markdown h2 {
+    font-size: 19px;
+}
+
+.ai-summary-markdown h3 {
+    font-size: 16px;
+}
+
+.ai-summary-markdown p,
+.ai-summary-markdown ul,
+.ai-summary-markdown ol,
+.ai-summary-markdown blockquote,
+.ai-summary-markdown pre {
+    margin: 0 0 12px;
+}
+
+.ai-summary-markdown ul,
+.ai-summary-markdown ol {
+    padding-left: 22px;
+}
+
+.ai-summary-markdown li + li {
+    margin-top: 6px;
+}
+
+.ai-summary-markdown a {
+    color: var(--cyan);
+}
+
+.ai-summary-markdown code {
+    border: 1px solid rgb(255 255 255 / 0.08);
+    border-radius: 5px;
+    background: #101112;
+    padding: 1px 5px;
     font:
-        13px/1.55 ui-monospace,
+        12px/1.45 ui-monospace,
         SFMono-Regular,
         Menlo,
         Consolas,
         monospace;
+}
+
+.ai-summary-markdown pre {
+    overflow: auto;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    background: #101112;
+    padding: 12px;
+}
+
+.ai-summary-markdown pre code {
+    border: 0;
+    background: transparent;
+    padding: 0;
+}
+
+.ai-summary-markdown blockquote {
+    border-left: 3px solid var(--accent);
+    color: #d5d0c7;
+    padding-left: 12px;
 }
 
 @media (max-width: 1120px) {
@@ -1305,5 +1442,22 @@ a.reader-action {
 
     .modal-grid {
         grid-template-columns: 1fr;
+    }
+
+    #aiSummaryModal {
+        padding-top: 18px;
+    }
+
+    .ai-summary-card {
+        max-height: calc(100vh - 36px);
+    }
+
+    .ai-summary-prompt-input {
+        min-height: 180px;
+    }
+
+    .ai-summary-result {
+        min-height: 280px;
+        max-height: 48vh;
     }
 }

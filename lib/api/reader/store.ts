@@ -29,6 +29,7 @@ export type ReaderFeed = {
     homeUrl: string;
     category: string;
     group: string;
+    aiSummaryPrompt: string;
     refreshSeconds: number;
     serverSyncEnabled: boolean;
     paused: boolean;
@@ -47,6 +48,7 @@ export type ReaderFeedInput = {
     homeUrl?: string;
     category?: string;
     group?: string;
+    aiSummaryPrompt?: string;
     refreshSeconds?: number;
     serverSyncEnabled?: boolean;
     paused?: boolean;
@@ -205,6 +207,7 @@ export function rowToFeed(row: QueryResultRow): ReaderFeed {
         homeUrl: row.home_url || '',
         category: row.category || 'articles',
         group: row.group_name || '',
+        aiSummaryPrompt: row.ai_summary_prompt || '',
         refreshSeconds: Number(row.refresh_seconds) || 300,
         serverSyncEnabled: row.server_sync_enabled,
         paused: row.paused,
@@ -274,6 +277,7 @@ export function dataToFeedInput(url: string, data: Data, current?: Partial<Reade
         homeUrl: data.link || current?.homeUrl || url,
         category: current?.category || inferCategory(url),
         group: current?.group || '',
+        aiSummaryPrompt: current?.aiSummaryPrompt || '',
         refreshSeconds: current?.refreshSeconds || 300,
         serverSyncEnabled: current?.serverSyncEnabled ?? false,
         paused: current?.paused ?? false,
@@ -309,6 +313,7 @@ export async function ensureSchema() {
                 home_url TEXT NOT NULL DEFAULT '',
                 category TEXT NOT NULL DEFAULT 'articles',
                 group_name TEXT NOT NULL DEFAULT '',
+                ai_summary_prompt TEXT NOT NULL DEFAULT '',
                 refresh_seconds INTEGER NOT NULL DEFAULT 300,
                 server_sync_enabled BOOLEAN NOT NULL DEFAULT FALSE,
                 paused BOOLEAN NOT NULL DEFAULT FALSE,
@@ -319,6 +324,9 @@ export async function ensureSchema() {
                 created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                 updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
             );
+
+            ALTER TABLE reader_feeds
+            ADD COLUMN IF NOT EXISTS ai_summary_prompt TEXT NOT NULL DEFAULT '';
 
             CREATE TABLE IF NOT EXISTS reader_fetch_runs (
                 id BIGSERIAL PRIMARY KEY,
@@ -458,6 +466,7 @@ function feedValues(feed: ReaderFeedInput) {
         feed.homeUrl || url,
         normalizeCategory(feed.category),
         String(feed.group || ''),
+        String(feed.aiSummaryPrompt || ''),
         normalizeRefreshSeconds(feed.refreshSeconds),
         Boolean(feed.serverSyncEnabled),
         Boolean(feed.paused),
@@ -471,15 +480,17 @@ export async function upsertFeed(feed: ReaderFeedInput) {
     const result = await getPool().query(
         `
             INSERT INTO reader_feeds (
-                id, url, title, home_url, category, group_name, refresh_seconds,
-                server_sync_enabled, paused, last_fetched_at, next_fetch_at, last_error
+                id, url, title, home_url, category, group_name, ai_summary_prompt,
+                refresh_seconds, server_sync_enabled, paused, last_fetched_at, next_fetch_at,
+                last_error
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
             ON CONFLICT (url) DO UPDATE SET
                 title = EXCLUDED.title,
                 home_url = EXCLUDED.home_url,
                 category = EXCLUDED.category,
                 group_name = EXCLUDED.group_name,
+                ai_summary_prompt = COALESCE(NULLIF(EXCLUDED.ai_summary_prompt, ''), reader_feeds.ai_summary_prompt),
                 refresh_seconds = EXCLUDED.refresh_seconds,
                 server_sync_enabled = EXCLUDED.server_sync_enabled,
                 paused = EXCLUDED.paused,
@@ -506,6 +517,7 @@ export async function updateFeed(feedId: string, patch: ReaderFeedPatch) {
         homeUrl: patch.homeUrl ?? current.homeUrl,
         category: patch.category ?? current.category,
         group: patch.group ?? current.group,
+        aiSummaryPrompt: patch.aiSummaryPrompt ?? current.aiSummaryPrompt,
         refreshSeconds: patch.refreshSeconds ?? current.refreshSeconds,
         serverSyncEnabled: patch.serverSyncEnabled ?? current.serverSyncEnabled,
         paused: patch.paused ?? current.paused,
@@ -513,6 +525,46 @@ export async function updateFeed(feedId: string, patch: ReaderFeedPatch) {
         nextFetchAt: patch.nextFetchAt ?? current.nextFetchAt,
         lastError: patch.lastError ?? current.lastError,
     });
+}
+
+function normalizeFeedIds(feedIds: string[]) {
+    return [...new Set(feedIds.map((feedId) => String(feedId || '').trim()).filter(Boolean))];
+}
+
+export async function getFeedsAiSummaryPrompt(feedIds: string[]) {
+    const ids = normalizeFeedIds(feedIds);
+    if (!ids.length) {
+        return '';
+    }
+    const result = await getPool().query(
+        `
+            SELECT ai_summary_prompt
+            FROM reader_feeds
+            WHERE id = ANY($1::text[])
+                AND ai_summary_prompt <> ''
+            ORDER BY array_position($1::text[], id)
+            LIMIT 1
+        `,
+        [ids]
+    );
+    return result.rows[0]?.ai_summary_prompt || '';
+}
+
+export async function updateFeedsAiSummaryPrompt(feedIds: string[], prompt: string) {
+    const ids = normalizeFeedIds(feedIds);
+    if (!ids.length) {
+        return 0;
+    }
+    const result = await getPool().query(
+        `
+            UPDATE reader_feeds
+            SET ai_summary_prompt = $2,
+                updated_at = NOW()
+            WHERE id = ANY($1::text[])
+        `,
+        [ids, prompt]
+    );
+    return result.rowCount || 0;
 }
 
 export async function updateFeedItemsCategory(feedId: string, category: string) {

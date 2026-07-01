@@ -1,9 +1,39 @@
 import { Hono } from 'hono';
+import MarkdownIt from 'markdown-it';
 
 import { refreshFeed } from './reader/scheduler';
-import { createFeedId, deleteFeed, deleteFeedItems, ensureSchema, getPool, listFeeds, rowToItem, updateFeed, updateFeedItemsCategory, upsertFeed, upsertItems } from './reader/store';
+import {
+    createFeedId,
+    deleteFeed,
+    deleteFeedItems,
+    ensureSchema,
+    getFeedsAiSummaryPrompt,
+    getPool,
+    listFeeds,
+    rowToItem,
+    updateFeed,
+    updateFeedItemsCategory,
+    updateFeedsAiSummaryPrompt,
+    upsertFeed,
+    upsertItems,
+} from './reader/store';
 
 const app = new Hono();
+const markdown = MarkdownIt({
+    breaks: true,
+    html: false,
+    linkify: true,
+});
+const defaultAiSummaryPrompt = [
+    '请用中文总结这个 RSS 订阅源最近 {{days}} 天的内容。',
+    '要求：',
+    '1. 先给出 3-6 条核心要点。',
+    '2. 再列出主要趋势或重复出现的主题。',
+    '3. 最后列出最值得打开阅读的 3-5 篇，并说明理由。',
+    '',
+    '共收集到 {{itemCount}} 条，以下最多展示 80 条：',
+    '{{items}}',
+].join('\n');
 
 function normalizeLimit(value: string | undefined) {
     const limit = Number(value);
@@ -32,6 +62,10 @@ function normalizeSummaryFeedIds(value: unknown) {
     return [...new Set(value.map((feedId) => String(feedId || '').trim()).filter(Boolean))].slice(0, 100);
 }
 
+function normalizeSummaryPrompt(value: unknown) {
+    return typeof value === 'string' ? value.trim() : '';
+}
+
 function normalizeDiscordRole(value: unknown) {
     const role = String(value || '').trim();
     return ['admin', 'bot', 'user'].includes(role) ? role : 'user';
@@ -55,24 +89,38 @@ function limitText(value: string, maxLength: number) {
     return value.length > maxLength ? value.slice(0, maxLength) + '...' : value;
 }
 
-function buildSummaryPrompt(items, days: number) {
-    const lines = items.slice(0, 80).map((item, index) => {
-        const content = limitText(stripHtml(item.summary || item.description || ''), 420);
-        return [`${index + 1}. ${item.title}`, item.author ? `Author: ${item.author}` : '', item.pubDate ? `Date: ${item.pubDate}` : '', item.link ? `Link: ${item.link}` : '', content ? `Content: ${content}` : '']
-            .filter(Boolean)
-            .join('\n');
-    });
+function buildSummaryItemsText(items) {
+    return items
+        .slice(0, 80)
+        .map((item, index) => {
+            const content = limitText(stripHtml(item.summary || item.description || ''), 420);
+            return [`${index + 1}. ${item.title}`, item.author ? `Author: ${item.author}` : '', item.pubDate ? `Date: ${item.pubDate}` : '', item.link ? `Link: ${item.link}` : '', content ? `Content: ${content}` : '']
+                .filter(Boolean)
+                .join('\n');
+        })
+        .join('\n\n');
+}
 
-    return [
-        `请用中文总结这个 RSS 订阅源最近 ${days} 天的内容。`,
-        '要求：',
-        '1. 先给出 3-6 条核心要点。',
-        '2. 再列出主要趋势或重复出现的主题。',
-        '3. 最后列出最值得打开阅读的 3-5 篇，并说明理由。',
-        '',
-        `共收集到 ${items.length} 条，以下最多展示 80 条：`,
-        lines.join('\n\n'),
-    ].join('\n');
+function replacePromptToken(value: string, token: string, replacement: string) {
+    return value.split(token).join(replacement);
+}
+
+function renderSummaryPrompt(promptTemplate: string, items, days: number) {
+    const itemsText = buildSummaryItemsText(items);
+    const hasItemsPlaceholder = promptTemplate.includes('{{items}}');
+    const promptWithDays = replacePromptToken(promptTemplate, '{{days}}', String(days));
+    const promptWithItemCount = replacePromptToken(promptWithDays, '{{itemCount}}', String(items.length));
+    const prompt = replacePromptToken(promptWithItemCount, '{{items}}', itemsText);
+
+    if (hasItemsPlaceholder) {
+        return prompt;
+    }
+
+    return [prompt, '', `共收集到 ${items.length} 条，以下最多展示 80 条：`, itemsText].join('\n');
+}
+
+function renderSummaryMarkdown(value: string) {
+    return value ? markdown.render(value) : '';
 }
 
 async function getSummaryItems(feedIds: string[], days: number) {
@@ -95,9 +143,14 @@ async function getSummaryItems(feedIds: string[], days: number) {
     return result.rows.map((row) => rowToItem(row));
 }
 
-async function buildAiSummaryResponse(feedIds: string[], days: number) {
+async function buildAiSummaryResponse(feedIds: string[], days: number, promptValue?: unknown, savePrompt?: boolean) {
+    const submittedPrompt = normalizeSummaryPrompt(promptValue);
+    const promptTemplate = submittedPrompt || (await getFeedsAiSummaryPrompt(feedIds)) || defaultAiSummaryPrompt;
+    if (savePrompt && submittedPrompt) {
+        await updateFeedsAiSummaryPrompt(feedIds, promptTemplate);
+    }
     const items = await getSummaryItems(feedIds, days);
-    const prompt = buildSummaryPrompt(items, days);
+    const prompt = renderSummaryPrompt(promptTemplate, items, days);
     const aiResult = items.length
         ? await requestAiSummary(prompt)
         : {
@@ -111,6 +164,8 @@ async function buildAiSummaryResponse(feedIds: string[], days: number) {
         days,
         itemCount: items.length,
         prompt,
+        promptTemplate,
+        summaryHtml: renderSummaryMarkdown(aiResult.summary),
     };
 }
 
@@ -233,6 +288,7 @@ function feedBodyToInput(body, requestUrl?: string) {
         homeUrl: body.homeUrl,
         category: body.category,
         group: body.group,
+        aiSummaryPrompt: typeof body.aiSummaryPrompt === 'string' ? body.aiSummaryPrompt : undefined,
         refreshSeconds: refreshSeconds === undefined ? undefined : getRefreshSeconds(refreshSeconds),
         serverSyncEnabled: typeof body.serverSyncEnabled === 'boolean' ? body.serverSyncEnabled : undefined,
         paused: typeof body.paused === 'boolean' ? body.paused : undefined,
@@ -368,6 +424,7 @@ app.patch('/feeds/bulk', async (ctx) => {
                 updateFeed(feedId, {
                     category: patch.category,
                     group: patch.group,
+                    aiSummaryPrompt: patch.aiSummaryPrompt,
                     nextFetchAt: patch.nextFetchAt,
                     refreshSeconds: patch.refreshSeconds,
                     serverSyncEnabled: patch.serverSyncEnabled,
@@ -457,7 +514,7 @@ app.patch('/items/:id', async (ctx) => {
 app.post('/feeds/:feedId/ai-summary', async (ctx) => {
     const body = await ctx.req.json();
     const days = normalizeSummaryDays(body.days);
-    const result = await buildAiSummaryResponse([ctx.req.param('feedId')], days);
+    const result = await buildAiSummaryResponse([ctx.req.param('feedId')], days, body.prompt, body.savePrompt === true);
 
     return ctx.json(result);
 });
@@ -466,7 +523,7 @@ app.post('/feeds/ai-summary', async (ctx) => {
     const body = await ctx.req.json();
     const days = normalizeSummaryDays(body.days);
     const feedIds = normalizeSummaryFeedIds(body.feedIds);
-    const result = await buildAiSummaryResponse(feedIds, days);
+    const result = await buildAiSummaryResponse(feedIds, days, body.prompt, body.savePrompt === true);
 
     return ctx.json(result);
 });
