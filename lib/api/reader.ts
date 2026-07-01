@@ -34,6 +34,17 @@ const defaultAiSummaryPrompt = [
     '不总结：',
     '1. 安全提醒与垃圾/诈骗信息信息',
 ].join('\n');
+const defaultMultiAiSummaryPrompt = [
+    '请用中文按频道汇总这些 RSS 订阅源最近 {{days}} 天的内容。',
+    '要求：',
+    '1. 先给出跨频道的 5-8 条核心要点，合并重复信息。',
+    '2. 按频道列出各自最重要的进展、讨论或异常信号。',
+    '3. 标出跨频道反复出现的趋势、共识、分歧或待跟进事项。',
+    '4. 最后列出最值得打开阅读的 3-5 条内容，并说明来自哪个频道和理由。',
+    '',
+    '不总结：',
+    '1. 安全提醒与垃圾/诈骗信息信息',
+].join('\n');
 
 function normalizeLimit(value: string | undefined) {
     const limit = Number(value);
@@ -94,7 +105,15 @@ function buildSummaryItemsText(items) {
         .slice(0, 80)
         .map((item, index) => {
             const content = limitText(stripHtml(item.summary || item.description || ''), 420);
-            return [`${index + 1}. ${item.title}`, item.author ? `Author: ${item.author}` : '', item.pubDate ? `Date: ${item.pubDate}` : '', item.link ? `Link: ${item.link}` : '', content ? `Content: ${content}` : '']
+            const source = [item.feedGroup, item.feedTitle].filter(Boolean).join(' / ');
+            return [
+                `${index + 1}. ${item.title}`,
+                source ? `Source: ${source}` : '',
+                item.author ? `Author: ${item.author}` : '',
+                item.pubDate ? `Date: ${item.pubDate}` : '',
+                item.link ? `Link: ${item.link}` : '',
+                content ? `Content: ${content}` : '',
+            ]
                 .filter(Boolean)
                 .join('\n');
         })
@@ -131,21 +150,27 @@ async function getSummaryItems(feedIds: string[], days: number) {
     const sinceMs = Date.now() - days * 24 * 60 * 60 * 1000;
     const result = await getPool().query(
         `
-            SELECT *
-            FROM reader_items
-            WHERE feed_id = ANY($1::text[])
-                AND pub_date_ms >= $2
-            ORDER BY pub_date_ms DESC, id DESC
+            SELECT item.*, feed.title AS feed_title, feed.group_name AS feed_group
+            FROM reader_items item
+            LEFT JOIN reader_feeds feed ON feed.id = item.feed_id
+            WHERE item.feed_id = ANY($1::text[])
+                AND item.pub_date_ms >= $2
+            ORDER BY item.pub_date_ms DESC, item.id DESC
             LIMIT 200
         `,
         [feedIds, sinceMs]
     );
-    return result.rows.map((row) => rowToItem(row));
+    return result.rows.map((row) => ({
+        ...rowToItem(row),
+        feedGroup: row.feed_group || '',
+        feedTitle: row.feed_title || '',
+    }));
 }
 
 async function buildAiSummaryResponse(feedIds: string[], days: number, promptValue?: unknown, savePrompt?: boolean) {
     const submittedPrompt = normalizeSummaryPrompt(promptValue);
-    const promptTemplate = submittedPrompt || (await getFeedsAiSummaryPrompt(feedIds)) || defaultAiSummaryPrompt;
+    const defaultPrompt = feedIds.length > 1 ? defaultMultiAiSummaryPrompt : defaultAiSummaryPrompt;
+    const promptTemplate = submittedPrompt || (await getFeedsAiSummaryPrompt(feedIds)) || defaultPrompt;
     if (savePrompt && submittedPrompt) {
         await updateFeedsAiSummaryPrompt(feedIds, promptTemplate);
     }

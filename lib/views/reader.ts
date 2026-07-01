@@ -5,8 +5,8 @@ export const readerHtml = String.raw`<!doctype html>
         <meta name="viewport" content="width=device-width, initial-scale=1">
         <title>RSSHub Reader</title>
         <link rel="icon" href="/favicon.png">
-        <link rel="stylesheet" href="/reader/app.css?v=ai-summary-copy-markdown">
-        <script type="module" src="/reader/app.js?v=ai-summary-copy-markdown"></script>
+        <link rel="stylesheet" href="/reader/app.css?v=ai-summary-channel-picker">
+        <script type="module" src="/reader/app.js?v=ai-summary-channel-picker"></script>
     </head>
     <body>
         <main class="app-shell">
@@ -61,6 +61,7 @@ export const readerHtml = String.raw`<!doctype html>
                 <div class="source-list" id="sourceList" aria-label="Feed sources"></div>
                 <footer class="sidebar-settings">
                     <button id="settingsButton" class="settings-button" type="button" title="Settings" aria-label="Settings" aria-expanded="false">⚙</button>
+                    <button id="openGlobalAiSummaryButton" class="settings-button ai-summary-sidebar-button" type="button" title="AI 总结" aria-label="AI 总结">AI</button>
                     <div id="settingsMenu" class="settings-menu" hidden>
                         <button id="importConfigButton" class="settings-menu-button" type="button">导入配置</button>
                         <button id="exportConfigButton" class="settings-menu-button" type="button">导出配置</button>
@@ -190,13 +191,26 @@ export const readerHtml = String.raw`<!doctype html>
                     </div>
                     <button id="closeAiSummaryButton" class="round-button" type="button" aria-label="Close">X</button>
                 </header>
-                <label class="modal-field" for="aiSummaryRangeInput">
-                    <span>总结范围</span>
-                    <select id="aiSummaryRangeInput">
-                        <option value="1">最近 1 天</option>
-                        <option value="7">最近 7 天</option>
-                    </select>
-                </label>
+                <div class="ai-summary-config">
+                    <label class="modal-field" for="aiSummaryRangeInput">
+                        <span>总结范围</span>
+                        <select id="aiSummaryRangeInput">
+                            <option value="1">最近 1 天</option>
+                            <option value="7">最近 7 天</option>
+                        </select>
+                    </label>
+                    <div id="aiSummaryChannelField" class="modal-field ai-summary-channel-field" hidden>
+                        <span>频道选择</span>
+                        <div class="ai-summary-channel-toolbar">
+                            <strong id="aiSummarySelectedCount">已选择 0 个</strong>
+                            <div>
+                                <button id="selectAllAiSummaryChannelsButton" class="secondary-button compact-action-button" type="button">全选</button>
+                                <button id="clearAiSummaryChannelsButton" class="secondary-button compact-action-button" type="button">清空</button>
+                            </div>
+                        </div>
+                        <div id="aiSummaryChannelList" class="ai-summary-channel-list"></div>
+                    </div>
+                </div>
                 <label class="modal-field" for="aiSummaryPromptInput">
                     <span>AI 提示词</span>
                     <textarea id="aiSummaryPromptInput" class="ai-summary-prompt-input" spellcheck="false"></textarea>
