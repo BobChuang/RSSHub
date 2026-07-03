@@ -1,50 +1,26 @@
 import { Hono } from 'hono';
-import MarkdownIt from 'markdown-it';
 
+import { buildAiSummaryResponse, normalizeSummaryDays, normalizeSummaryFeedIds } from './reader/ai-summary';
 import { refreshFeed } from './reader/scheduler';
 import {
+    createAiSummaryPushId,
     createFeedId,
     deleteFeed,
     deleteFeedItems,
     ensureSchema,
-    getFeedsAiSummaryPrompt,
+    getAiSummaryPushByFeedIds,
+    getNextAiSummaryPushAt,
     getPool,
     listFeeds,
     rowToItem,
     updateFeed,
     updateFeedItemsCategory,
-    updateFeedsAiSummaryPrompt,
+    upsertAiSummaryPush,
     upsertFeed,
     upsertItems,
 } from './reader/store';
 
 const app = new Hono();
-const markdown = MarkdownIt({
-    breaks: true,
-    html: false,
-    linkify: true,
-});
-const defaultAiSummaryPrompt = [
-    '请用中文总结这个 RSS 订阅源最近 {{days}} 天的内容。',
-    '要求：',
-    '1. 先给出 3-6 条核心要点。',
-    '2. 再列出主要趋势或重复出现的主题。',
-    '3. 最后列出最值得打开阅读的 3-5 篇，并说明理由。',
-    '',
-    '不总结：',
-    '1. 安全提醒与垃圾/诈骗信息信息',
-].join('\n');
-const defaultMultiAiSummaryPrompt = [
-    '请用中文按频道汇总这些 RSS 订阅源最近 {{days}} 天的内容。',
-    '要求：',
-    '1. 先给出跨频道的 5-8 条核心要点，合并重复信息。',
-    '2. 按频道列出各自最重要的进展、讨论或异常信号。',
-    '3. 标出跨频道反复出现的趋势、共识、分歧或待跟进事项。',
-    '4. 最后列出最值得打开阅读的 3-5 条内容，并说明来自哪个频道和理由。',
-    '',
-    '不总结：',
-    '1. 安全提醒与垃圾/诈骗信息信息',
-].join('\n');
 
 function normalizeLimit(value: string | undefined) {
     const limit = Number(value);
@@ -62,21 +38,6 @@ function normalizeOffset(value: string | undefined) {
     return Math.max(Math.trunc(offset), 0);
 }
 
-function normalizeSummaryDays(value: unknown) {
-    return Number(value) === 7 ? 7 : 1;
-}
-
-function normalizeSummaryFeedIds(value: unknown) {
-    if (!Array.isArray(value)) {
-        return [];
-    }
-    return [...new Set(value.map((feedId) => String(feedId || '').trim()).filter(Boolean))].slice(0, 100);
-}
-
-function normalizeSummaryPrompt(value: unknown) {
-    return typeof value === 'string' ? value.trim() : '';
-}
-
 function normalizeDiscordRole(value: unknown) {
     const role = String(value || '').trim();
     return ['admin', 'bot', 'user'].includes(role) ? role : 'user';
@@ -87,169 +48,6 @@ function normalizeDiscordAuthors(value: unknown) {
         return [];
     }
     return [...new Set(value.map((author) => String(author || '').trim()).filter(Boolean))].slice(0, 200);
-}
-
-function stripHtml(value: string) {
-    return value
-        .replaceAll(/<[^>]*>/g, ' ')
-        .replaceAll(/\s+/g, ' ')
-        .trim();
-}
-
-function limitText(value: string, maxLength: number) {
-    return value.length > maxLength ? value.slice(0, maxLength) + '...' : value;
-}
-
-function buildSummaryItemsText(items) {
-    return items
-        .slice(0, 80)
-        .map((item, index) => {
-            const content = limitText(stripHtml(item.summary || item.description || ''), 420);
-            const source = [item.feedGroup, item.feedTitle].filter(Boolean).join(' / ');
-            return [
-                `${index + 1}. ${item.title}`,
-                source ? `Source: ${source}` : '',
-                item.author ? `Author: ${item.author}` : '',
-                item.pubDate ? `Date: ${item.pubDate}` : '',
-                item.link ? `Link: ${item.link}` : '',
-                content ? `Content: ${content}` : '',
-            ]
-                .filter(Boolean)
-                .join('\n');
-        })
-        .join('\n\n');
-}
-
-function replacePromptToken(value: string, token: string, replacement: string) {
-    return value.split(token).join(replacement);
-}
-
-function renderSummaryPrompt(promptTemplate: string, items, days: number) {
-    const itemsText = buildSummaryItemsText(items);
-    const hasItemsPlaceholder = promptTemplate.includes('{{items}}');
-    const promptWithDays = replacePromptToken(promptTemplate, '{{days}}', String(days));
-    const promptWithItemCount = replacePromptToken(promptWithDays, '{{itemCount}}', String(items.length));
-    const prompt = replacePromptToken(promptWithItemCount, '{{items}}', itemsText);
-
-    if (hasItemsPlaceholder) {
-        return prompt;
-    }
-
-    return [prompt, '', `共收集到 ${items.length} 条，以下最多展示 80 条：`, itemsText].join('\n');
-}
-
-function renderSummaryMarkdown(value: string) {
-    return value ? markdown.render(value) : '';
-}
-
-async function getSummaryItems(feedIds: string[], days: number) {
-    if (!feedIds.length) {
-        return [];
-    }
-
-    const sinceMs = Date.now() - days * 24 * 60 * 60 * 1000;
-    const result = await getPool().query(
-        `
-            SELECT item.*, feed.title AS feed_title, feed.group_name AS feed_group
-            FROM reader_items item
-            LEFT JOIN reader_feeds feed ON feed.id = item.feed_id
-            WHERE item.feed_id = ANY($1::text[])
-                AND item.pub_date_ms >= $2
-            ORDER BY item.pub_date_ms DESC, item.id DESC
-            LIMIT 200
-        `,
-        [feedIds, sinceMs]
-    );
-    return result.rows.map((row) => ({
-        ...rowToItem(row),
-        feedGroup: row.feed_group || '',
-        feedTitle: row.feed_title || '',
-    }));
-}
-
-async function buildAiSummaryResponse(feedIds: string[], days: number, promptValue?: unknown, savePrompt?: boolean) {
-    const submittedPrompt = normalizeSummaryPrompt(promptValue);
-    const defaultPrompt = feedIds.length > 1 ? defaultMultiAiSummaryPrompt : defaultAiSummaryPrompt;
-    const promptTemplate = submittedPrompt || (await getFeedsAiSummaryPrompt(feedIds)) || defaultPrompt;
-    if (savePrompt && submittedPrompt) {
-        await updateFeedsAiSummaryPrompt(feedIds, promptTemplate);
-    }
-    const items = await getSummaryItems(feedIds, days);
-    const prompt = renderSummaryPrompt(promptTemplate, items, days);
-    const aiResult = items.length
-        ? await requestAiSummary(prompt)
-        : {
-              configured: Boolean((process.env.READER_AI_API_KEY || process.env.OPENAI_API_KEY) && process.env.READER_AI_MODEL),
-              message: '',
-              summary: '',
-          };
-
-    return {
-        ...aiResult,
-        days,
-        itemCount: items.length,
-        prompt,
-        promptTemplate,
-        summaryHtml: renderSummaryMarkdown(aiResult.summary),
-    };
-}
-
-function getAiRequestUrl() {
-    const configuredUrl = process.env.READER_AI_REQUEST_URL?.trim();
-    const baseUrl = (process.env.READER_AI_BASE_URL || 'https://api.openai.com/v1').replace(/\/$/, '');
-    const requestUrl = configuredUrl || `${baseUrl}/chat/completions`;
-
-    if (/\/v1\/?$/.test(requestUrl)) {
-        return requestUrl.replace(/\/$/, '') + '/chat/completions';
-    }
-
-    return requestUrl;
-}
-
-async function requestAiSummary(prompt: string) {
-    const apiKey = process.env.READER_AI_API_KEY || process.env.OPENAI_API_KEY;
-    const model = process.env.READER_AI_MODEL;
-    const requestUrl = getAiRequestUrl();
-
-    if (!apiKey || !model) {
-        return {
-            configured: false,
-            message: 'AI summary is not configured. Set READER_AI_REQUEST_URL, READER_AI_API_KEY, and READER_AI_MODEL to enable automatic summaries.',
-            summary: '',
-        };
-    }
-
-    const response = await fetch(requestUrl, {
-        body: JSON.stringify({
-            messages: [
-                {
-                    content: 'You summarize RSS reader content clearly and concisely in Chinese.',
-                    role: 'system',
-                },
-                {
-                    content: prompt,
-                    role: 'user',
-                },
-            ],
-            model,
-            temperature: 0.2,
-        }),
-        headers: {
-            authorization: `Bearer ${apiKey}`,
-            'content-type': 'application/json',
-        },
-        method: 'POST',
-    });
-    const data = await response.json();
-    if (!response.ok) {
-        throw new Error(data?.error?.message || 'AI summary request failed.');
-    }
-
-    return {
-        configured: true,
-        message: '',
-        summary: data?.choices?.[0]?.message?.content || '',
-    };
 }
 
 function getItemFilters(ctx, options: { unreadOnly?: boolean } = {}) {
@@ -328,6 +126,35 @@ function patchNextFetchAt(patch) {
         patch.nextFetchAt = new Date(Date.now() + patch.refreshSeconds * 1000).toISOString();
     }
     return patch;
+}
+
+function normalizeAiSummaryPushSendTime(value: unknown) {
+    const time = String(value || '').trim();
+    return /^(?:[01]\d|2[0-3]):[0-5]\d$/.test(time) ? time : '09:00';
+}
+
+function normalizeAiSummaryWebhookUrl(value: unknown) {
+    const webhookUrl = String(value || '').trim();
+    if (!webhookUrl) {
+        return '';
+    }
+    try {
+        const url = new URL(webhookUrl);
+        return url.protocol === 'http:' || url.protocol === 'https:' ? url.href : '';
+    } catch {
+        return '';
+    }
+}
+
+function normalizeAiSummaryPushNextSendAt(value: unknown, sendTime: string, enabled: boolean) {
+    if (!enabled) {
+        return;
+    }
+    const date = value ? new Date(String(value)) : undefined;
+    if (date && !Number.isNaN(date.getTime()) && date.getTime() > Date.now() - 60 * 1000) {
+        return date.toISOString();
+    }
+    return getNextAiSummaryPushAt(sendTime);
 }
 
 app.use('*', async (ctx, next) => {
@@ -534,6 +361,46 @@ app.patch('/items/:id', async (ctx) => {
         [ctx.req.param('id'), typeof body.isRead === 'boolean' ? body.isRead : null, typeof body.isStarred === 'boolean' ? body.isStarred : null]
     );
     return ctx.json(result.rows[0] ? rowToItem(result.rows[0]) : null);
+});
+
+app.post('/ai-summary-pushes/lookup', async (ctx) => {
+    const body = await ctx.req.json();
+    const feedIds = normalizeSummaryFeedIds(body.feedIds);
+    if (!feedIds.length) {
+        return ctx.json({ push: null });
+    }
+
+    return ctx.json({ push: await getAiSummaryPushByFeedIds(feedIds) });
+});
+
+app.put('/ai-summary-pushes', async (ctx) => {
+    const body = await ctx.req.json();
+    const feedIds = normalizeSummaryFeedIds(body.feedIds);
+    if (!feedIds.length) {
+        return ctx.json({ error: 'feedIds are required.' }, 400);
+    }
+
+    const enabled = body.enabled === true;
+    const webhookUrl = normalizeAiSummaryWebhookUrl(body.webhookUrl);
+    if (enabled && !webhookUrl) {
+        return ctx.json({ error: 'A valid webhook URL is required to enable AI summary push.' }, 400);
+    }
+
+    const sendTime = normalizeAiSummaryPushSendTime(body.sendTime);
+    const push = await upsertAiSummaryPush({
+        days: normalizeSummaryDays(body.days),
+        enabled,
+        feedIds,
+        id: createAiSummaryPushId(feedIds),
+        nextSendAt: normalizeAiSummaryPushNextSendAt(body.nextSendAt, sendTime, enabled),
+        prompt: typeof body.prompt === 'string' ? body.prompt : '',
+        sendTime,
+        timezone: typeof body.timezone === 'string' ? body.timezone : '',
+        title: typeof body.title === 'string' ? body.title : '',
+        webhookUrl,
+    });
+
+    return ctx.json(push);
 });
 
 app.post('/feeds/:feedId/ai-summary', async (ctx) => {

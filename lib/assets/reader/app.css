@@ -1229,8 +1229,14 @@ a.reader-action {
     grid-template-columns: minmax(180px, 250px) minmax(0, 1fr);
 }
 
-.ai-summary-config > .modal-field {
+.ai-summary-config > .modal-field,
+.ai-summary-primary-config {
     min-width: 0;
+}
+
+.ai-summary-primary-config {
+    display: grid;
+    gap: 12px;
 }
 
 .ai-summary-prompt-input {
@@ -1244,6 +1250,58 @@ a.reader-action {
         Consolas,
         monospace;
     white-space: pre-wrap;
+}
+
+.ai-summary-push-panel {
+    display: grid;
+    gap: 10px;
+    border-top: 1px solid var(--line);
+    padding-top: 2px;
+}
+
+.ai-summary-push-toggle {
+    display: flex;
+    width: fit-content;
+    align-items: center;
+    gap: 9px;
+    color: var(--ink);
+    font-size: 13px;
+    font-weight: 850;
+}
+
+.ai-summary-push-toggle input {
+    width: 16px;
+    height: 16px;
+    padding: 0;
+}
+
+.ai-summary-push-settings {
+    display: grid;
+    grid-template-columns: minmax(280px, 1fr) 150px;
+    align-items: end;
+    gap: 10px;
+}
+
+.ai-summary-primary-config .ai-summary-push-settings {
+    grid-template-columns: 1fr;
+}
+
+.ai-summary-push-settings[hidden] {
+    display: none;
+}
+
+.ai-summary-push-save-button {
+    justify-self: start;
+    min-height: 40px;
+    white-space: nowrap;
+}
+
+.ai-summary-push-status {
+    min-height: 18px;
+    margin: 0;
+    color: var(--muted);
+    font-size: 12px;
+    line-height: 1.5;
 }
 
 .ai-summary-channel-field[hidden] {
@@ -1571,6 +1629,10 @@ a.reader-action {
 
     .ai-summary-prompt-input {
         min-height: 180px;
+    }
+
+    .ai-summary-push-settings {
+        grid-template-columns: 1fr;
     }
 
     .ai-summary-result {

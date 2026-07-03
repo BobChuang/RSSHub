@@ -1,0 +1,385 @@
+import MarkdownIt from 'markdown-it';
+
+import type { ReaderAiSummaryPush } from './store';
+import { getFeedsAiSummaryPrompt, getPool, rowToItem, updateFeedsAiSummaryPrompt } from './store';
+
+const markdown = MarkdownIt({
+    breaks: true,
+    html: false,
+    linkify: true,
+});
+const larkMarkdownChunkLength = 4000;
+
+export const defaultAiSummaryPrompt = [
+    '请用中文总结这个 RSS 订阅源最近 {{days}} 天的内容。',
+    '要求：',
+    '1. 先给出 3-6 条核心要点。',
+    '2. 再列出主要趋势或重复出现的主题。',
+    '3. 最后列出最值得打开阅读的 3-5 篇，并说明理由。',
+    '',
+    '不总结：',
+    '1. 安全提醒与垃圾/诈骗信息信息',
+].join('\n');
+
+export const defaultMultiAiSummaryPrompt = [
+    '请用中文按频道汇总这些 RSS 订阅源最近 {{days}} 天的内容。',
+    '要求：',
+    '1. 先给出跨频道的 5-8 条核心要点，合并重复信息。',
+    '2. 按频道列出各自最重要的进展、讨论或异常信号。',
+    '3. 标出跨频道反复出现的趋势、共识、分歧或待跟进事项。',
+    '4. 最后列出最值得打开阅读的 3-5 条内容，并说明来自哪个频道和理由。',
+    '',
+    '不总结：',
+    '1. 安全提醒与垃圾/诈骗信息信息',
+].join('\n');
+
+export function normalizeSummaryDays(value: unknown) {
+    return Number(value) === 7 ? 7 : 1;
+}
+
+export function normalizeSummaryFeedIds(value: unknown) {
+    if (!Array.isArray(value)) {
+        return [];
+    }
+    return [...new Set(value.map((feedId) => String(feedId || '').trim()).filter(Boolean))].slice(0, 100);
+}
+
+export function normalizeSummaryPrompt(value: unknown) {
+    return typeof value === 'string' ? value.trim() : '';
+}
+
+function stripHtml(value: string) {
+    return value
+        .replaceAll(/<[^>]*>/g, ' ')
+        .replaceAll(/\s+/g, ' ')
+        .trim();
+}
+
+function limitText(value: string, maxLength: number) {
+    return value.length > maxLength ? value.slice(0, maxLength) + '...' : value;
+}
+
+function buildSummaryItemsText(items) {
+    return items
+        .slice(0, 80)
+        .map((item, index) => {
+            const content = limitText(stripHtml(item.summary || item.description || ''), 420);
+            const source = [item.feedGroup, item.feedTitle].filter(Boolean).join(' / ');
+            return [
+                `${index + 1}. ${item.title}`,
+                source ? `Source: ${source}` : '',
+                item.author ? `Author: ${item.author}` : '',
+                item.pubDate ? `Date: ${item.pubDate}` : '',
+                item.link ? `Link: ${item.link}` : '',
+                content ? `Content: ${content}` : '',
+            ]
+                .filter(Boolean)
+                .join('\n');
+        })
+        .join('\n\n');
+}
+
+function replacePromptToken(value: string, token: string, replacement: string) {
+    return value.split(token).join(replacement);
+}
+
+function renderSummaryPrompt(promptTemplate: string, items, days: number) {
+    const itemsText = buildSummaryItemsText(items);
+    const hasItemsPlaceholder = promptTemplate.includes('{{items}}');
+    const promptWithDays = replacePromptToken(promptTemplate, '{{days}}', String(days));
+    const promptWithItemCount = replacePromptToken(promptWithDays, '{{itemCount}}', String(items.length));
+    const prompt = replacePromptToken(promptWithItemCount, '{{items}}', itemsText);
+
+    if (hasItemsPlaceholder) {
+        return prompt;
+    }
+
+    return [prompt, '', `共收集到 ${items.length} 条，以下最多展示 80 条：`, itemsText].join('\n');
+}
+
+function renderSummaryMarkdown(value: string) {
+    return value ? markdown.render(value) : '';
+}
+
+async function getSummaryItems(feedIds: string[], days: number) {
+    if (!feedIds.length) {
+        return [];
+    }
+
+    const sinceMs = Date.now() - days * 24 * 60 * 60 * 1000;
+    const result = await getPool().query(
+        `
+            SELECT item.*, feed.title AS feed_title, feed.group_name AS feed_group
+            FROM reader_items item
+            LEFT JOIN reader_feeds feed ON feed.id = item.feed_id
+            WHERE item.feed_id = ANY($1::text[])
+                AND item.pub_date_ms >= $2
+            ORDER BY item.pub_date_ms DESC, item.id DESC
+            LIMIT 200
+        `,
+        [feedIds, sinceMs]
+    );
+    return result.rows.map((row) => ({
+        ...rowToItem(row),
+        feedGroup: row.feed_group || '',
+        feedTitle: row.feed_title || '',
+    }));
+}
+
+export async function buildAiSummaryResponse(feedIds: string[], days: number, promptValue?: unknown, savePrompt?: boolean) {
+    const submittedPrompt = normalizeSummaryPrompt(promptValue);
+    const defaultPrompt = feedIds.length > 1 ? defaultMultiAiSummaryPrompt : defaultAiSummaryPrompt;
+    const promptTemplate = submittedPrompt || (await getFeedsAiSummaryPrompt(feedIds)) || defaultPrompt;
+    if (savePrompt && submittedPrompt) {
+        await updateFeedsAiSummaryPrompt(feedIds, promptTemplate);
+    }
+    const items = await getSummaryItems(feedIds, days);
+    const prompt = renderSummaryPrompt(promptTemplate, items, days);
+    const aiResult = items.length
+        ? await requestAiSummary(prompt)
+        : {
+              configured: Boolean((process.env.READER_AI_API_KEY || process.env.OPENAI_API_KEY) && process.env.READER_AI_MODEL),
+              message: '',
+              summary: '',
+          };
+
+    return {
+        ...aiResult,
+        days,
+        itemCount: items.length,
+        prompt,
+        promptTemplate,
+        summaryHtml: renderSummaryMarkdown(aiResult.summary),
+    };
+}
+
+function getAiRequestUrl() {
+    const configuredUrl = process.env.READER_AI_REQUEST_URL?.trim();
+    const baseUrl = (process.env.READER_AI_BASE_URL || 'https://api.openai.com/v1').replace(/\/$/, '');
+    const requestUrl = configuredUrl || `${baseUrl}/chat/completions`;
+
+    if (/\/v1\/?$/.test(requestUrl)) {
+        return requestUrl.replace(/\/$/, '') + '/chat/completions';
+    }
+
+    return requestUrl;
+}
+
+async function requestAiSummary(prompt: string) {
+    const apiKey = process.env.READER_AI_API_KEY || process.env.OPENAI_API_KEY;
+    const model = process.env.READER_AI_MODEL;
+    const requestUrl = getAiRequestUrl();
+
+    if (!apiKey || !model) {
+        return {
+            configured: false,
+            message: 'AI summary is not configured. Set READER_AI_REQUEST_URL, READER_AI_API_KEY, and READER_AI_MODEL to enable automatic summaries.',
+            summary: '',
+        };
+    }
+
+    const response = await fetch(requestUrl, {
+        body: JSON.stringify({
+            messages: [
+                {
+                    content: 'You summarize RSS reader content clearly and concisely in Chinese.',
+                    role: 'system',
+                },
+                {
+                    content: prompt,
+                    role: 'user',
+                },
+            ],
+            model,
+            temperature: 0.2,
+        }),
+        headers: {
+            authorization: `Bearer ${apiKey}`,
+            'content-type': 'application/json',
+        },
+        method: 'POST',
+    });
+    const data = await response.json();
+    if (!response.ok) {
+        throw new Error(data?.error?.message || 'AI summary request failed.');
+    }
+
+    return {
+        configured: true,
+        message: '',
+        summary: data?.choices?.[0]?.message?.content || '',
+    };
+}
+
+function getWebhookKind(webhookUrl: string) {
+    try {
+        const url = new URL(webhookUrl);
+        const host = url.hostname;
+        const path = url.pathname;
+        if (host.includes('discord.com') && path.includes('/api/webhooks/')) {
+            return 'discord';
+        }
+        if (host.includes('hooks.slack.com')) {
+            return 'slack';
+        }
+        if (host.includes('open.feishu.cn') || host.includes('larksuite.com')) {
+            return 'lark';
+        }
+        if (host.includes('qyapi.weixin.qq.com')) {
+            return 'wechat-work';
+        }
+        if (host.includes('oapi.dingtalk.com')) {
+            return 'dingtalk';
+        }
+    } catch {
+        // Validate webhook URLs before saving; this fallback keeps sender defensive.
+    }
+
+    return 'generic';
+}
+
+function buildWebhookText(push: ReaderAiSummaryPush, result) {
+    const title = push.title || (push.feedIds.length > 1 ? '多频道 AI 总结' : 'AI 总结');
+    const meta = `最近 ${result.days} 天 / ${result.itemCount} 条内容`;
+    const body = result.summary || result.message || '这个范围内还没有可总结的数据。';
+    return [`# ${title}`, meta, body].join('\n\n');
+}
+
+function stripMarkdownEmphasis(value: string) {
+    return value.replaceAll('**', '').replaceAll('__', '').trim();
+}
+
+function formatLarkMarkdown(value: string) {
+    return value
+        .split('\n')
+        .map((line) => {
+            const heading = line.match(/^ {0,3}#{1,6} (.+)$/);
+            if (heading) {
+                return `**${stripMarkdownEmphasis(heading[1])}**`;
+            }
+            if (/^\s*-{3,}\s*$/.test(line)) {
+                return '';
+            }
+            return line.replaceAll(/\*\*([^*\n]+)\*\*/g, (_, text: string) => `**${text.trimEnd()}**`);
+        })
+        .join('\n')
+        .replaceAll(/\n{3,}/g, '\n\n')
+        .trim();
+}
+
+function splitLarkMarkdown(value: string) {
+    const chunks: string[] = [];
+    let chunk = '';
+
+    for (const line of value.split('\n')) {
+        if (line.length > larkMarkdownChunkLength) {
+            if (chunk) {
+                chunks.push(chunk);
+                chunk = '';
+            }
+            for (let index = 0; index < line.length; index += larkMarkdownChunkLength) {
+                chunks.push(line.slice(index, index + larkMarkdownChunkLength));
+            }
+            continue;
+        }
+
+        const candidate = chunk ? `${chunk}\n${line}` : line;
+        if (candidate.length > larkMarkdownChunkLength) {
+            chunks.push(chunk);
+            chunk = line;
+            continue;
+        }
+        chunk = candidate;
+    }
+
+    if (chunk) {
+        chunks.push(chunk);
+    }
+    return chunks.length ? chunks : [''];
+}
+
+function buildLarkCard(push: ReaderAiSummaryPush, result) {
+    const title = push.title || (push.feedIds.length > 1 ? '多频道 AI 总结' : 'AI 总结');
+    const meta = `**最近 ${result.days} 天 / ${result.itemCount} 条内容**`;
+    const body = result.summary || result.message || '这个范围内还没有可总结的数据。';
+    const content = formatLarkMarkdown([meta, body].join('\n\n'));
+
+    return {
+        card: {
+            config: {
+                wide_screen_mode: true,
+            },
+            elements: splitLarkMarkdown(content).map((markdown) => ({
+                content: markdown,
+                tag: 'markdown',
+            })),
+            header: {
+                title: {
+                    content: title,
+                    tag: 'plain_text',
+                },
+            },
+        },
+        msg_type: 'interactive',
+    };
+}
+
+function getWebhookBody(push: ReaderAiSummaryPush, result) {
+    const text = buildWebhookText(push, result);
+    const kind = getWebhookKind(push.webhookUrl);
+
+    if (kind === 'discord') {
+        return { content: text.slice(0, 2000) };
+    }
+    if (kind === 'slack') {
+        return { text };
+    }
+    if (kind === 'lark') {
+        return buildLarkCard(push, result);
+    }
+    if (kind === 'wechat-work') {
+        return {
+            msgtype: 'text',
+            text: { content: text },
+        };
+    }
+    if (kind === 'dingtalk') {
+        return {
+            msgtype: 'text',
+            text: { content: text },
+        };
+    }
+
+    return {
+        days: result.days,
+        feedIds: push.feedIds,
+        generatedAt: new Date().toISOString(),
+        itemCount: result.itemCount,
+        summary: result.summary,
+        summaryHtml: result.summaryHtml,
+        text,
+        title: push.title,
+    };
+}
+
+async function postAiSummaryWebhook(push: ReaderAiSummaryPush, result) {
+    const response = await fetch(push.webhookUrl, {
+        body: JSON.stringify(getWebhookBody(push, result)),
+        headers: {
+            'content-type': 'application/json',
+        },
+        method: 'POST',
+    });
+    if (!response.ok) {
+        throw new Error(`Webhook request failed with HTTP ${response.status}.`);
+    }
+}
+
+export async function sendAiSummaryPush(push: ReaderAiSummaryPush) {
+    const result = await buildAiSummaryResponse(push.feedIds, push.days, push.prompt || undefined, false);
+    if (!result.configured) {
+        throw new Error(result.message || 'AI summary is not configured.');
+    }
+    await postAiSummaryWebhook(push, result);
+    return result;
+}

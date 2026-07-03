@@ -192,13 +192,33 @@ export const readerHtml = String.raw`<!doctype html>
                     <button id="closeAiSummaryButton" class="round-button" type="button" aria-label="Close">X</button>
                 </header>
                 <div class="ai-summary-config">
-                    <label class="modal-field" for="aiSummaryRangeInput">
-                        <span>总结范围</span>
-                        <select id="aiSummaryRangeInput">
-                            <option value="1">最近 1 天</option>
-                            <option value="7">最近 7 天</option>
-                        </select>
-                    </label>
+                    <div class="ai-summary-primary-config">
+                        <label class="modal-field" for="aiSummaryRangeInput">
+                            <span>总结范围</span>
+                            <select id="aiSummaryRangeInput">
+                                <option value="1">最近 1 天</option>
+                                <option value="7">最近 7 天</option>
+                            </select>
+                        </label>
+                        <div class="ai-summary-push-panel">
+                            <label class="ai-summary-push-toggle" for="aiSummaryPushEnabledInput">
+                                <input id="aiSummaryPushEnabledInput" type="checkbox">
+                                <span>定时推送</span>
+                            </label>
+                            <div id="aiSummaryPushSettings" class="ai-summary-push-settings" hidden>
+                                <label class="modal-field" for="aiSummaryWebhookInput">
+                                    <span>Webhook</span>
+                                    <input id="aiSummaryWebhookInput" type="url" placeholder="https://..." autocomplete="off" disabled>
+                                </label>
+                                <label class="modal-field" for="aiSummaryPushTimeInput">
+                                    <span>发送时间</span>
+                                    <input id="aiSummaryPushTimeInput" type="time" value="09:00" disabled>
+                                </label>
+                            </div>
+                            <button id="saveAiSummaryPushButton" class="secondary-button ai-summary-push-save-button" type="button">保存推送</button>
+                            <p id="aiSummaryPushStatus" class="ai-summary-push-status"></p>
+                        </div>
+                    </div>
                     <div id="aiSummaryChannelField" class="modal-field ai-summary-channel-field" hidden>
                         <span>频道选择</span>
                         <div class="ai-summary-channel-toolbar">

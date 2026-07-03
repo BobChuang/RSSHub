@@ -41,6 +41,25 @@ export type ReaderFeed = {
     updatedAt: string;
 };
 
+export type ReaderAiSummaryPush = {
+    id: string;
+    feedIds: string[];
+    title: string;
+    days: number;
+    prompt: string;
+    webhookUrl: string;
+    enabled: boolean;
+    sendTime: string;
+    timezone: string;
+    nextSendAt: string;
+    lastSentAt: string;
+    lastSentForDate: string;
+    lastError: string;
+    sendLockedUntil: string;
+    createdAt: string;
+    updatedAt: string;
+};
+
 export type ReaderFeedInput = {
     id?: string;
     url: string;
@@ -55,6 +74,19 @@ export type ReaderFeedInput = {
     lastFetchedAt?: string;
     nextFetchAt?: string;
     lastError?: string;
+};
+
+export type ReaderAiSummaryPushInput = {
+    id?: string;
+    feedIds: string[];
+    title?: string;
+    days?: number;
+    prompt?: string;
+    webhookUrl?: string;
+    enabled?: boolean;
+    sendTime?: string;
+    timezone?: string;
+    nextSendAt?: string;
 };
 
 export type ReaderFeedPatch = Partial<Omit<ReaderFeedInput, 'id' | 'url'>> & {
@@ -139,12 +171,46 @@ function normalizeRefreshSeconds(value: unknown) {
     return Math.min(Math.max(Math.trunc(seconds), 30), 24 * 60 * 60);
 }
 
+function normalizeSummaryPushDays(value: unknown) {
+    return Number(value) === 7 ? 7 : 1;
+}
+
+function normalizeSummaryPushFeedIds(feedIds: unknown) {
+    if (!Array.isArray(feedIds)) {
+        return [];
+    }
+    return [...new Set(feedIds.map((feedId) => String(feedId || '').trim()).filter(Boolean))].slice(0, 100);
+}
+
+function normalizeSummaryPushSendTime(value: unknown) {
+    const time = String(value || '').trim();
+    return /^(?:[01]\d|2[0-3]):[0-5]\d$/.test(time) ? time : '09:00';
+}
+
+function normalizeSummaryPushTimezone(value: unknown) {
+    return String(value || '')
+        .trim()
+        .slice(0, 80);
+}
+
 function toIsoString(value: unknown) {
     if (!value) {
         return '';
     }
     const date = value instanceof Date ? value : new Date(String(value));
     return Number.isNaN(date.getTime()) ? '' : date.toISOString();
+}
+
+export function getNextAiSummaryPushAt(sendTime: string, after: Date | string = new Date()) {
+    const anchor = after instanceof Date ? after : new Date(after);
+    const from = Number.isNaN(anchor.getTime()) ? new Date() : anchor;
+    const [hours, minutes] = normalizeSummaryPushSendTime(sendTime).split(':').map(Number);
+    const next = new Date(from);
+    next.setHours(hours, minutes, 0, 0);
+    if (next.getTime() <= from.getTime()) {
+        next.setDate(next.getDate() + 1);
+    }
+    return next.toISOString();
 }
 
 function getTimestamp(value: unknown) {
@@ -215,6 +281,27 @@ export function rowToFeed(row: QueryResultRow): ReaderFeed {
         nextFetchAt: toIsoString(row.next_fetch_at),
         lastError: row.last_error || '',
         syncLockedUntil: toIsoString(row.sync_locked_until),
+        createdAt: toIsoString(row.created_at),
+        updatedAt: toIsoString(row.updated_at),
+    };
+}
+
+export function rowToAiSummaryPush(row: QueryResultRow): ReaderAiSummaryPush {
+    return {
+        id: row.id,
+        feedIds: normalizeSummaryPushFeedIds(row.feed_ids),
+        title: row.title || '',
+        days: normalizeSummaryPushDays(row.days),
+        prompt: row.prompt || '',
+        webhookUrl: row.webhook_url || '',
+        enabled: row.enabled,
+        sendTime: normalizeSummaryPushSendTime(row.send_time),
+        timezone: normalizeSummaryPushTimezone(row.timezone),
+        nextSendAt: toIsoString(row.next_send_at),
+        lastSentAt: toIsoString(row.last_sent_at),
+        lastSentForDate: row.last_sent_for_date || '',
+        lastError: row.last_error || '',
+        sendLockedUntil: toIsoString(row.send_locked_until),
         createdAt: toIsoString(row.created_at),
         updatedAt: toIsoString(row.updated_at),
     };
@@ -328,6 +415,25 @@ export async function ensureSchema() {
             ALTER TABLE reader_feeds
             ADD COLUMN IF NOT EXISTS ai_summary_prompt TEXT NOT NULL DEFAULT '';
 
+            CREATE TABLE IF NOT EXISTS reader_ai_summary_pushes (
+                id TEXT PRIMARY KEY,
+                feed_ids JSONB NOT NULL DEFAULT '[]'::jsonb,
+                title TEXT NOT NULL DEFAULT '',
+                days INTEGER NOT NULL DEFAULT 1,
+                prompt TEXT NOT NULL DEFAULT '',
+                webhook_url TEXT NOT NULL DEFAULT '',
+                enabled BOOLEAN NOT NULL DEFAULT FALSE,
+                send_time TEXT NOT NULL DEFAULT '09:00',
+                timezone TEXT NOT NULL DEFAULT '',
+                next_send_at TIMESTAMPTZ,
+                last_sent_at TIMESTAMPTZ,
+                last_sent_for_date TEXT NOT NULL DEFAULT '',
+                last_error TEXT NOT NULL DEFAULT '',
+                send_locked_until TIMESTAMPTZ,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            );
+
             CREATE TABLE IF NOT EXISTS reader_fetch_runs (
                 id BIGSERIAL PRIMARY KEY,
                 feed_id TEXT NOT NULL,
@@ -351,6 +457,7 @@ export async function ensureSchema() {
             CREATE INDEX IF NOT EXISTS reader_items_category_pub_date_idx ON reader_items (category, pub_date_ms DESC);
             CREATE INDEX IF NOT EXISTS reader_items_unread_category_idx ON reader_items (is_read, category);
             CREATE INDEX IF NOT EXISTS reader_items_search_idx ON reader_items USING gin (to_tsvector('simple', search_text));
+            CREATE INDEX IF NOT EXISTS reader_ai_summary_pushes_next_send_idx ON reader_ai_summary_pushes (enabled, next_send_at);
             CREATE INDEX IF NOT EXISTS reader_feeds_next_fetch_idx ON reader_feeds (server_sync_enabled, paused, next_fetch_at);
             CREATE INDEX IF NOT EXISTS reader_fetch_runs_feed_started_idx ON reader_fetch_runs (feed_id, started_at DESC);
 
@@ -476,6 +583,35 @@ function feedValues(feed: ReaderFeedInput) {
     ];
 }
 
+export function createAiSummaryPushId(feedIds: string[]) {
+    return createId(
+        normalizeSummaryPushFeedIds(feedIds)
+            .toSorted((left, right) => left.localeCompare(right))
+            .join('|')
+    );
+}
+
+function aiSummaryPushValues(push: ReaderAiSummaryPushInput) {
+    const feedIds = normalizeSummaryPushFeedIds(push.feedIds);
+    const sendTime = normalizeSummaryPushSendTime(push.sendTime);
+    const enabled = Boolean(push.enabled);
+    const nextSendAt = enabled ? toIsoString(push.nextSendAt) || getNextAiSummaryPushAt(sendTime) : null;
+    return [
+        push.id || createAiSummaryPushId(feedIds),
+        JSON.stringify(feedIds),
+        String(push.title || '')
+            .trim()
+            .slice(0, 160),
+        normalizeSummaryPushDays(push.days),
+        String(push.prompt || '').trim(),
+        String(push.webhookUrl || '').trim(),
+        enabled,
+        sendTime,
+        normalizeSummaryPushTimezone(push.timezone),
+        nextSendAt,
+    ];
+}
+
 export async function upsertFeed(feed: ReaderFeedInput) {
     const result = await getPool().query(
         `
@@ -503,6 +639,34 @@ export async function upsertFeed(feed: ReaderFeedInput) {
         feedValues(feed)
     );
     return rowToFeed(result.rows[0]);
+}
+
+export async function upsertAiSummaryPush(push: ReaderAiSummaryPushInput) {
+    const result = await getPool().query(
+        `
+            INSERT INTO reader_ai_summary_pushes (
+                id, feed_ids, title, days, prompt, webhook_url, enabled, send_time,
+                timezone, next_send_at
+            )
+            VALUES ($1, $2::jsonb, $3, $4, $5, $6, $7, $8, $9, $10)
+            ON CONFLICT (id) DO UPDATE SET
+                feed_ids = EXCLUDED.feed_ids,
+                title = EXCLUDED.title,
+                days = EXCLUDED.days,
+                prompt = EXCLUDED.prompt,
+                webhook_url = EXCLUDED.webhook_url,
+                enabled = EXCLUDED.enabled,
+                send_time = EXCLUDED.send_time,
+                timezone = EXCLUDED.timezone,
+                next_send_at = EXCLUDED.next_send_at,
+                last_error = '',
+                send_locked_until = NULL,
+                updated_at = NOW()
+            RETURNING *
+        `,
+        aiSummaryPushValues(push)
+    );
+    return rowToAiSummaryPush(result.rows[0]);
 }
 
 export async function updateFeed(feedId: string, patch: ReaderFeedPatch) {
@@ -567,6 +731,11 @@ export async function updateFeedsAiSummaryPrompt(feedIds: string[], prompt: stri
     return result.rowCount || 0;
 }
 
+export async function getAiSummaryPushByFeedIds(feedIds: string[]) {
+    const result = await getPool().query('SELECT * FROM reader_ai_summary_pushes WHERE id = $1', [createAiSummaryPushId(feedIds)]);
+    return result.rows[0] ? rowToAiSummaryPush(result.rows[0]) : null;
+}
+
 export async function updateFeedItemsCategory(feedId: string, category: string) {
     await getPool().query('UPDATE reader_items SET category = $2, updated_at = NOW() WHERE feed_id = $1', [feedId, normalizeCategory(category)]);
 }
@@ -580,6 +749,7 @@ export async function deleteFeed(feedId: string) {
     try {
         await client.query('BEGIN');
         await deleteFeedItems(feedId, client);
+        await client.query('DELETE FROM reader_ai_summary_pushes WHERE feed_ids ? $1', [feedId]);
         const result = await client.query('DELETE FROM reader_feeds WHERE id = $1', [feedId]);
         await client.query('COMMIT');
         return (result.rowCount || 0) > 0;
@@ -634,6 +804,68 @@ export async function claimDueFeeds(limit = 5, lockSeconds = 300) {
         [limit, lockSeconds]
     );
     return result.rows.map((row) => rowToFeed(row));
+}
+
+export async function claimDueAiSummaryPushes(limit = 5, lockSeconds = 300) {
+    const result = await getPool().query(
+        `
+            WITH due AS (
+                SELECT id
+                FROM reader_ai_summary_pushes
+                WHERE enabled = TRUE
+                    AND webhook_url <> ''
+                    AND next_send_at IS NOT NULL
+                    AND next_send_at <= NOW()
+                    AND (send_locked_until IS NULL OR send_locked_until <= NOW())
+                ORDER BY next_send_at ASC, created_at ASC
+                LIMIT $1
+                FOR UPDATE SKIP LOCKED
+            )
+            UPDATE reader_ai_summary_pushes
+            SET send_locked_until = NOW() + ($2::text || ' seconds')::interval,
+                updated_at = NOW()
+            WHERE id IN (SELECT id FROM due)
+            RETURNING *
+        `,
+        [limit, lockSeconds]
+    );
+    return result.rows.map((row) => rowToAiSummaryPush(row));
+}
+
+export async function completeAiSummaryPush(pushId: string, nextSendAt: string) {
+    const result = await getPool().query(
+        `
+            UPDATE reader_ai_summary_pushes
+            SET
+                last_sent_at = NOW(),
+                last_sent_for_date = TO_CHAR(NOW(), 'YYYY-MM-DD'),
+                next_send_at = $2,
+                last_error = '',
+                send_locked_until = NULL,
+                updated_at = NOW()
+            WHERE id = $1
+            RETURNING *
+        `,
+        [pushId, nextSendAt]
+    );
+    return result.rows[0] ? rowToAiSummaryPush(result.rows[0]) : null;
+}
+
+export async function failAiSummaryPush(pushId: string, message: string, nextSendAt: string) {
+    const result = await getPool().query(
+        `
+            UPDATE reader_ai_summary_pushes
+            SET
+                next_send_at = $2,
+                last_error = $3,
+                send_locked_until = NULL,
+                updated_at = NOW()
+            WHERE id = $1
+            RETURNING *
+        `,
+        [pushId, nextSendAt, message]
+    );
+    return result.rows[0] ? rowToAiSummaryPush(result.rows[0]) : null;
 }
 
 export async function recordFetchRun(feedId: string, status: FetchRunStatus, itemCount = 0, error = '', startedAt?: string) {

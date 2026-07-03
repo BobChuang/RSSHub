@@ -1,9 +1,23 @@
 import { config } from '@/config';
 import logger from '@/utils/logger';
 
+import { sendAiSummaryPush } from './ai-summary';
 import { parseFeedText } from './feed-parser';
-import type { ReaderFeed } from './store';
-import { claimDueFeeds, ensureSchema, getFeed, hasReaderDatabase, persistDataItems, recordFetchRun, updateFeedFetchState, upsertFeed } from './store';
+import type { ReaderAiSummaryPush, ReaderFeed } from './store';
+import {
+    claimDueAiSummaryPushes,
+    claimDueFeeds,
+    completeAiSummaryPush,
+    ensureSchema,
+    failAiSummaryPush,
+    getFeed,
+    getNextAiSummaryPushAt,
+    hasReaderDatabase,
+    persistDataItems,
+    recordFetchRun,
+    updateFeedFetchState,
+    upsertFeed,
+} from './store';
 
 let schedulerStarted = false;
 let schedulerRunning = false;
@@ -27,6 +41,17 @@ function getFetchTimeoutMs() {
 
 function getLockSeconds() {
     return Math.max(Math.ceil(getFetchTimeoutMs() / 1000) + config.reader.schedulerInterval, 30);
+}
+
+function getNextPushSendAt(push: ReaderAiSummaryPush) {
+    const next = push.nextSendAt ? new Date(push.nextSendAt) : new Date(getNextAiSummaryPushAt(push.sendTime));
+    if (Number.isNaN(next.getTime())) {
+        return getNextAiSummaryPushAt(push.sendTime);
+    }
+    do {
+        next.setDate(next.getDate() + 1);
+    } while (next.getTime() <= Date.now());
+    return next.toISOString();
 }
 
 async function fetchFeedData(feed: ReaderFeed) {
@@ -105,6 +130,18 @@ export async function refreshFeed(feedOrId: ReaderFeed | string) {
     }
 }
 
+async function sendDueAiSummaryPush(push: ReaderAiSummaryPush) {
+    const nextSendAt = getNextPushSendAt(push);
+    try {
+        await sendAiSummaryPush(push);
+        await completeAiSummaryPush(push.id, nextSendAt);
+    } catch (error) {
+        const message = error instanceof Error ? error.message : 'Unable to send AI summary push.';
+        await failAiSummaryPush(push.id, message, nextSendAt);
+        logger.warn(`Reader AI summary push failed for ${push.title || push.id}: ${message}`);
+    }
+}
+
 async function tick() {
     if (schedulerRunning || !hasReaderDatabase()) {
         return;
@@ -112,16 +149,17 @@ async function tick() {
     schedulerRunning = true;
     try {
         await ensureSchema();
-        const feeds = await claimDueFeeds(config.reader.schedulerBatchSize, getLockSeconds());
-        await Promise.all(
-            feeds.map(async (feed) => {
+        const [feeds, pushes] = await Promise.all([claimDueFeeds(config.reader.schedulerBatchSize, getLockSeconds()), claimDueAiSummaryPushes(config.reader.schedulerBatchSize, getLockSeconds())]);
+        await Promise.all([
+            ...feeds.map(async (feed) => {
                 try {
                     await refreshFeed(feed);
                 } catch (error) {
                     logger.warn(`Reader feed refresh failed for ${feed.url}: ${error instanceof Error ? error.message : error}`);
                 }
-            })
-        );
+            }),
+            ...pushes.map((push) => sendDueAiSummaryPush(push)),
+        ]);
     } catch (error) {
         logger.warn(`Reader scheduler tick failed: ${error instanceof Error ? error.message : error}`);
     } finally {
