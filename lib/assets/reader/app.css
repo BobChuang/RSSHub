@@ -1259,6 +1259,12 @@ a.reader-action {
     padding-top: 2px;
 }
 
+.ai-summary-push-mode-list {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px 16px;
+}
+
 .ai-summary-push-toggle {
     display: flex;
     width: fit-content;
@@ -1287,6 +1293,10 @@ a.reader-action {
 }
 
 .ai-summary-push-settings[hidden] {
+    display: none;
+}
+
+#aiSummaryPushTimeField[hidden] {
     display: none;
 }
 

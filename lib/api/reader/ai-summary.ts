@@ -1,6 +1,6 @@
 import MarkdownIt from 'markdown-it';
 
-import type { ReaderAiSummaryPush } from './store';
+import type { ReaderAiSummaryPush, ReaderFeed, ReaderItem } from './store';
 import { getFeedsAiSummaryPrompt, getPool, rowToItem, updateFeedsAiSummaryPrompt } from './store';
 
 const markdown = MarkdownIt({
@@ -238,11 +238,15 @@ function getWebhookKind(webhookUrl: string) {
     return 'generic';
 }
 
-function buildWebhookText(push: ReaderAiSummaryPush, result) {
-    const title = push.title || (push.feedIds.length > 1 ? '多频道 AI 总结' : 'AI 总结');
-    const meta = `最近 ${result.days} 天 / ${result.itemCount} 条内容`;
-    const body = result.summary || result.message || '这个范围内还没有可总结的数据。';
-    return [`# ${title}`, meta, body].join('\n\n');
+type WebhookMessage = {
+    title: string;
+    meta: string;
+    body: string;
+    fallback: Record<string, unknown>;
+};
+
+function buildWebhookText(message: WebhookMessage) {
+    return [`# ${message.title}`, message.meta, message.body].filter(Boolean).join('\n\n');
 }
 
 function stripMarkdownEmphasis(value: string) {
@@ -298,11 +302,9 @@ function splitLarkMarkdown(value: string) {
     return chunks.length ? chunks : [''];
 }
 
-function buildLarkCard(push: ReaderAiSummaryPush, result) {
-    const title = push.title || (push.feedIds.length > 1 ? '多频道 AI 总结' : 'AI 总结');
-    const meta = `**最近 ${result.days} 天 / ${result.itemCount} 条内容**`;
-    const body = result.summary || result.message || '这个范围内还没有可总结的数据。';
-    const content = formatLarkMarkdown([meta, body].join('\n\n'));
+function buildLarkCard(message: WebhookMessage) {
+    const meta = message.meta ? `**${message.meta}**` : '';
+    const content = formatLarkMarkdown([meta, message.body].filter(Boolean).join('\n\n'));
 
     return {
         card: {
@@ -315,7 +317,7 @@ function buildLarkCard(push: ReaderAiSummaryPush, result) {
             })),
             header: {
                 title: {
-                    content: title,
+                    content: message.title,
                     tag: 'plain_text',
                 },
             },
@@ -324,8 +326,8 @@ function buildLarkCard(push: ReaderAiSummaryPush, result) {
     };
 }
 
-function getWebhookBody(push: ReaderAiSummaryPush, result) {
-    const text = buildWebhookText(push, result);
+function getWebhookBody(push: ReaderAiSummaryPush, message: WebhookMessage) {
+    const text = buildWebhookText(message);
     const kind = getWebhookKind(push.webhookUrl);
 
     if (kind === 'discord') {
@@ -335,7 +337,7 @@ function getWebhookBody(push: ReaderAiSummaryPush, result) {
         return { text };
     }
     if (kind === 'lark') {
-        return buildLarkCard(push, result);
+        return buildLarkCard(message);
     }
     if (kind === 'wechat-work') {
         return {
@@ -351,20 +353,16 @@ function getWebhookBody(push: ReaderAiSummaryPush, result) {
     }
 
     return {
-        days: result.days,
-        feedIds: push.feedIds,
+        ...message.fallback,
         generatedAt: new Date().toISOString(),
-        itemCount: result.itemCount,
-        summary: result.summary,
-        summaryHtml: result.summaryHtml,
         text,
-        title: push.title,
+        title: message.title,
     };
 }
 
-async function postAiSummaryWebhook(push: ReaderAiSummaryPush, result) {
+async function postPushWebhook(push: ReaderAiSummaryPush, message: WebhookMessage) {
     const response = await fetch(push.webhookUrl, {
-        body: JSON.stringify(getWebhookBody(push, result)),
+        body: JSON.stringify(getWebhookBody(push, message)),
         headers: {
             'content-type': 'application/json',
         },
@@ -375,11 +373,71 @@ async function postAiSummaryWebhook(push: ReaderAiSummaryPush, result) {
     }
 }
 
+function getAiSummaryWebhookMessage(push: ReaderAiSummaryPush, result): WebhookMessage {
+    return {
+        body: result.summary || result.message || '这个范围内还没有可总结的数据。',
+        fallback: {
+            days: result.days,
+            feedIds: push.feedIds,
+            itemCount: result.itemCount,
+            summary: result.summary,
+            summaryHtml: result.summaryHtml,
+        },
+        meta: `最近 ${result.days} 天 / ${result.itemCount} 条内容`,
+        title: push.title || (push.feedIds.length > 1 ? '多频道 AI 总结' : 'AI 总结'),
+    };
+}
+
+function buildRealtimeItemsBody(items: ReaderItem[]) {
+    const visibleItems = items.toSorted((left, right) => right.pubDateMs - left.pubDateMs || right.id.localeCompare(left.id));
+    const body = visibleItems
+        .slice(0, 20)
+        .map((item, index) => {
+            const content = limitText(stripHtml(item.summary || item.description || ''), 300);
+            const meta = [item.author, item.pubDate].filter(Boolean).join(' / ');
+            return [`${index + 1}. ${item.title || 'Untitled'}`, meta, item.link ? `Link: ${item.link}` : '', content].filter(Boolean).join('\n');
+        })
+        .join('\n\n');
+    const hiddenCount = visibleItems.length - 20;
+    return hiddenCount > 0 ? `${body}\n\n还有 ${hiddenCount} 条新内容未展示。` : body;
+}
+
+function getRealtimeWebhookMessage(push: ReaderAiSummaryPush, feed: ReaderFeed, items: ReaderItem[]): WebhookMessage {
+    const feedTitle = feed.title || feed.homeUrl || feed.url || '订阅源';
+    return {
+        body: buildRealtimeItemsBody(items),
+        fallback: {
+            feedId: feed.id,
+            feedIds: push.feedIds,
+            itemCount: items.length,
+            items: items.map((item) => ({
+                author: item.author,
+                id: item.id,
+                link: item.link,
+                pubDate: item.pubDate,
+                pubDateMs: item.pubDateMs,
+                title: item.title,
+            })),
+            mode: 'realtime',
+        },
+        meta: `${feedTitle} / ${items.length} 条新内容`,
+        title: push.title || `${feedTitle} 实时推送`,
+    };
+}
+
 export async function sendAiSummaryPush(push: ReaderAiSummaryPush) {
     const result = await buildAiSummaryResponse(push.feedIds, push.days, push.prompt || undefined, false);
     if (!result.configured) {
         throw new Error(result.message || 'AI summary is not configured.');
     }
-    await postAiSummaryWebhook(push, result);
+    await postPushWebhook(push, getAiSummaryWebhookMessage(push, result));
     return result;
+}
+
+export async function sendRealtimeItemsPush(push: ReaderAiSummaryPush, feed: ReaderFeed, items: ReaderItem[]) {
+    if (!items.length) {
+        return { itemCount: 0 };
+    }
+    await postPushWebhook(push, getRealtimeWebhookMessage(push, feed, items));
+    return { itemCount: items.length };
 }

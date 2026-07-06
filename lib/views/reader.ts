@@ -5,8 +5,8 @@ export const readerHtml = String.raw`<!doctype html>
         <meta name="viewport" content="width=device-width, initial-scale=1">
         <title>RSSHub Reader</title>
         <link rel="icon" href="/favicon.png">
-        <link rel="stylesheet" href="/reader/app.css?v=ai-summary-channel-picker">
-        <script type="module" src="/reader/app.js?v=ai-summary-channel-picker"></script>
+        <link rel="stylesheet" href="/reader/app.css?v=ai-summary-push-mode">
+        <script type="module" src="/reader/app.js?v=ai-summary-push-mode"></script>
     </head>
     <body>
         <main class="app-shell">
@@ -201,16 +201,22 @@ export const readerHtml = String.raw`<!doctype html>
                             </select>
                         </label>
                         <div class="ai-summary-push-panel">
-                            <label class="ai-summary-push-toggle" for="aiSummaryPushEnabledInput">
-                                <input id="aiSummaryPushEnabledInput" type="checkbox">
-                                <span>定时推送</span>
-                            </label>
+                            <div class="ai-summary-push-mode-list" aria-label="推送模式">
+                                <label class="ai-summary-push-toggle" for="aiSummaryPushEnabledInput">
+                                    <input id="aiSummaryPushEnabledInput" type="checkbox">
+                                    <span>定时推送</span>
+                                </label>
+                                <label class="ai-summary-push-toggle" for="aiSummaryRealtimePushInput">
+                                    <input id="aiSummaryRealtimePushInput" type="checkbox">
+                                    <span>实时推送</span>
+                                </label>
+                            </div>
                             <div id="aiSummaryPushSettings" class="ai-summary-push-settings" hidden>
                                 <label class="modal-field" for="aiSummaryWebhookInput">
                                     <span>Webhook</span>
                                     <input id="aiSummaryWebhookInput" type="url" placeholder="https://..." autocomplete="off" disabled>
                                 </label>
-                                <label class="modal-field" for="aiSummaryPushTimeInput">
+                                <label id="aiSummaryPushTimeField" class="modal-field" for="aiSummaryPushTimeInput">
                                     <span>发送时间</span>
                                     <input id="aiSummaryPushTimeInput" type="time" value="09:00" disabled>
                                 </label>

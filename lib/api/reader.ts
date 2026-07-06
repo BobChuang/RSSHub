@@ -9,6 +9,7 @@ import {
     deleteFeedItems,
     ensureSchema,
     getAiSummaryPushByFeedIds,
+    getFeedsLatestItemPubDateMs,
     getNextAiSummaryPushAt,
     getPool,
     listFeeds,
@@ -131,6 +132,10 @@ function patchNextFetchAt(patch) {
 function normalizeAiSummaryPushSendTime(value: unknown) {
     const time = String(value || '').trim();
     return /^(?:[01]\d|2[0-3]):[0-5]\d$/.test(time) ? time : '09:00';
+}
+
+function normalizeAiSummaryPushMode(value: unknown) {
+    return value === 'realtime' ? 'realtime' : 'summary';
 }
 
 function normalizeAiSummaryWebhookUrl(value: unknown) {
@@ -381,18 +386,22 @@ app.put('/ai-summary-pushes', async (ctx) => {
     }
 
     const enabled = body.enabled === true;
+    const mode = normalizeAiSummaryPushMode(body.mode);
     const webhookUrl = normalizeAiSummaryWebhookUrl(body.webhookUrl);
     if (enabled && !webhookUrl) {
-        return ctx.json({ error: 'A valid webhook URL is required to enable AI summary push.' }, 400);
+        return ctx.json({ error: 'A valid webhook URL is required to enable push.' }, 400);
     }
 
     const sendTime = normalizeAiSummaryPushSendTime(body.sendTime);
+    const latestPubDateMs = enabled && mode === 'realtime' ? await getFeedsLatestItemPubDateMs(feedIds) : 0;
     const push = await upsertAiSummaryPush({
         days: normalizeSummaryDays(body.days),
         enabled,
         feedIds,
         id: createAiSummaryPushId(feedIds),
-        nextSendAt: normalizeAiSummaryPushNextSendAt(body.nextSendAt, sendTime, enabled),
+        lastItemPubDateMs: enabled && mode === 'realtime' ? Math.max(latestPubDateMs, Date.now()) : 0,
+        mode,
+        nextSendAt: mode === 'summary' ? normalizeAiSummaryPushNextSendAt(body.nextSendAt, sendTime, enabled) : undefined,
         prompt: typeof body.prompt === 'string' ? body.prompt : '',
         sendTime,
         timezone: typeof body.timezone === 'string' ? body.timezone : '',

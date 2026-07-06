@@ -1,9 +1,9 @@
 import { config } from '@/config';
 import logger from '@/utils/logger';
 
-import { sendAiSummaryPush } from './ai-summary';
+import { sendAiSummaryPush, sendRealtimeItemsPush } from './ai-summary';
 import { parseFeedText } from './feed-parser';
-import type { ReaderAiSummaryPush, ReaderFeed } from './store';
+import type { ReaderAiSummaryPush, ReaderFeed, ReaderItem } from './store';
 import {
     claimDueAiSummaryPushes,
     claimDueFeeds,
@@ -13,8 +13,11 @@ import {
     getFeed,
     getNextAiSummaryPushAt,
     hasReaderDatabase,
-    persistDataItems,
+    listRealtimeAiSummaryPushesForFeed,
+    persistDataItemsWithNewItems,
     recordFetchRun,
+    recordRealtimeAiSummaryPushFailure,
+    recordRealtimeAiSummaryPushSuccess,
     updateFeedFetchState,
     upsertFeed,
 } from './store';
@@ -81,6 +84,29 @@ async function fetchFeedData(feed: ReaderFeed) {
     }
 }
 
+async function sendRealtimePushes(feed: ReaderFeed, newItems: ReaderItem[]) {
+    if (!newItems.length) {
+        return;
+    }
+    const pushes = await listRealtimeAiSummaryPushesForFeed(feed.id);
+    await Promise.all(
+        pushes.map(async (push) => {
+            const items = newItems.filter((item) => !push.lastItemPubDateMs || item.pubDateMs > push.lastItemPubDateMs);
+            if (!items.length) {
+                return;
+            }
+            try {
+                await sendRealtimeItemsPush(push, feed, items);
+                await recordRealtimeAiSummaryPushSuccess(push.id);
+            } catch (error) {
+                const message = error instanceof Error ? error.message : 'Unable to send realtime push.';
+                await recordRealtimeAiSummaryPushFailure(push.id, message);
+                logger.warn(`Reader realtime push failed for ${push.title || push.id}: ${message}`);
+            }
+        })
+    );
+}
+
 export async function refreshFeed(feedOrId: ReaderFeed | string) {
     await ensureSchema();
     const feed = typeof feedOrId === 'string' ? await getFeed(feedOrId) : feedOrId;
@@ -105,7 +131,8 @@ export async function refreshFeed(feedOrId: ReaderFeed | string) {
             nextFetchAt: getNextFetchAt(feed),
             lastError: '',
         });
-        const itemCount = await persistDataItems(savedFeed, data.item || []);
+        const { itemCount, newItems } = await persistDataItemsWithNewItems(savedFeed, data.item || []);
+        await sendRealtimePushes(savedFeed, newItems);
         await updateFeedFetchState(feed.id, {
             lastFetchedAt: startedAt,
             nextFetchAt: savedFeed.nextFetchAt,
