@@ -9,6 +9,7 @@ const markdown = MarkdownIt({
     linkify: true,
 });
 const larkMarkdownChunkLength = 4000;
+const summaryBatchItemLimit = 1000;
 
 export const defaultAiSummaryPrompt = [
     '请用中文总结这个 RSS 订阅源最近 {{days}} 天的内容。',
@@ -96,6 +97,36 @@ function renderSummaryPrompt(promptTemplate: string, items, days: number) {
     return [prompt, '', `共收集到 ${items.length} 条：`, itemsText].join('\n');
 }
 
+function getBatches<T>(items: T[], batchSize: number) {
+    const batches: T[][] = [];
+    for (let index = 0; index < items.length; index += batchSize) {
+        batches.push(items.slice(index, index + batchSize));
+    }
+    return batches;
+}
+
+function renderBatchSummaryPrompt(promptTemplate: string, items, days: number, batchIndex: number, batchCount: number, itemCount: number) {
+    return [`这是第 ${batchIndex + 1}/${batchCount} 批内容，全部时间范围内共有 ${itemCount} 条。请先只总结本批，保留重要事实、频道、链接和趋势，供最终汇总使用。`, '', renderSummaryPrompt(promptTemplate, items, days)].join('\n');
+}
+
+function renderFinalSummaryPrompt(promptTemplate: string, batchSummaries: string[], days: number, itemCount: number) {
+    const summaryText = batchSummaries.map((summary, index) => [`批次 ${index + 1}`, summary].join('\n')).join('\n\n');
+    const promptWithDays = replacePromptToken(promptTemplate, '{{days}}', String(days));
+    const promptWithItemCount = replacePromptToken(promptWithDays, '{{itemCount}}', String(itemCount));
+    const promptWithoutItems = replacePromptToken(promptWithItemCount, '{{items}}', '见下方分批总结');
+
+    return [
+        '下面是同一批 RSS 内容按 1000 条分批生成的中间总结。请基于全部中间总结生成最终总结，不要遗漏跨批次反复出现的趋势、重要频道和关键链接。',
+        '',
+        '原始总结要求：',
+        promptWithoutItems,
+        '',
+        `原始内容总数：${itemCount} 条 / 分批数：${batchSummaries.length}`,
+        '',
+        summaryText,
+    ].join('\n');
+}
+
 function renderSummaryMarkdown(value: string) {
     return value ? markdown.render(value) : '';
 }
@@ -114,7 +145,6 @@ async function getSummaryItems(feedIds: string[], days: number) {
             WHERE item.feed_id = ANY($1::text[])
                 AND item.pub_date_ms >= $2
             ORDER BY item.pub_date_ms DESC, item.id DESC
-            LIMIT 2000
         `,
         [feedIds, sinceMs]
     );
@@ -123,6 +153,41 @@ async function getSummaryItems(feedIds: string[], days: number) {
         feedGroup: row.feed_group || '',
         feedTitle: row.feed_title || '',
     }));
+}
+
+async function requestAiSummaryForItems(promptTemplate: string, items, days: number) {
+    const batches = getBatches(items, summaryBatchItemLimit);
+    if (batches.length <= 1) {
+        const prompt = renderSummaryPrompt(promptTemplate, items, days);
+        return {
+            ...(await requestAiSummary(prompt)),
+            prompt,
+        };
+    }
+
+    const batchResults = await Promise.all(
+        batches.map(async (batchItems, index) => {
+            const prompt = renderBatchSummaryPrompt(promptTemplate, batchItems, days, index, batches.length, items.length);
+            return {
+                prompt,
+                result: await requestAiSummary(prompt),
+            };
+        })
+    );
+    const failedBatch = batchResults.find(({ result }) => !result.configured || !result.summary);
+    if (failedBatch) {
+        return {
+            ...failedBatch.result,
+            prompt: failedBatch.prompt,
+        };
+    }
+    const batchSummaries = batchResults.map(({ result }) => result.summary);
+
+    const prompt = renderFinalSummaryPrompt(promptTemplate, batchSummaries, days, items.length);
+    return {
+        ...(await requestAiSummary(prompt)),
+        prompt,
+    };
 }
 
 export async function buildAiSummaryResponse(feedIds: string[], days: number, promptValue?: unknown, savePrompt?: boolean) {
@@ -135,12 +200,12 @@ export async function buildAiSummaryResponse(feedIds: string[], days: number, pr
         await (isSingleFeed ? updateFeedsAiSummaryPrompt(feedIds, promptTemplate) : updateMultiAiSummaryPrompt(promptTemplate));
     }
     const items = await getSummaryItems(feedIds, days);
-    const prompt = renderSummaryPrompt(promptTemplate, items, days);
     const aiResult = items.length
-        ? await requestAiSummary(prompt)
+        ? await requestAiSummaryForItems(promptTemplate, items, days)
         : {
               configured: Boolean((process.env.READER_AI_API_KEY || process.env.OPENAI_API_KEY) && process.env.READER_AI_MODEL),
               message: '',
+              prompt: renderSummaryPrompt(promptTemplate, items, days),
               summary: '',
           };
 
@@ -148,7 +213,7 @@ export async function buildAiSummaryResponse(feedIds: string[], days: number, pr
         ...aiResult,
         days,
         itemCount: items.length,
-        prompt,
+        prompt: aiResult.prompt,
         promptTemplate,
         summaryHtml: renderSummaryMarkdown(aiResult.summary),
     };
