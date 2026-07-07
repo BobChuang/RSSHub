@@ -25,18 +25,19 @@ function mockItems(length: number) {
     return Array.from({ length }, (_, index) => ({
         description: `Description ${index + 1}`,
         id: `item-${index + 1}`,
+        link: `https://example.com/items/${index + 1}`,
         title: `Title ${index + 1}`,
     }));
 }
 
-function mockAiFetch() {
+function mockAiFetch(getSummary = (prompt: string) => (prompt.includes('第 1/2 批') ? 'batch 1 summary' : prompt.includes('第 2/2 批') ? 'batch 2 summary' : 'final summary')) {
     process.env.READER_AI_API_KEY = 'test-key';
     process.env.READER_AI_MODEL = 'test-model';
     process.env.READER_AI_REQUEST_URL = 'https://ai.example.test/chat/completions';
     const fetchMock = vi.fn((_url, init: RequestInit) => {
         const body = JSON.parse(String(init.body));
         const prompt = body.messages.find((message) => message.role === 'user')?.content || '';
-        const summary = prompt.includes('第 1/2 批') ? 'batch 1 summary' : prompt.includes('第 2/2 批') ? 'batch 2 summary' : 'final summary';
+        const summary = getSummary(prompt);
 
         return Promise.resolve({
             json: () =>
@@ -131,7 +132,22 @@ describe('reader ai summary', () => {
 
         expect(mocks.getPoolQuery).toHaveBeenCalledWith(expect.not.stringContaining('LIMIT'), expect.any(Array));
         expect(result.prompt).toContain('100. Title 100');
+        expect(result.prompt).toContain('SourceID: S100');
         expect(result.prompt).not.toContain('最多展示 80 条');
+    });
+
+    it('adds source links from source ids in a single summary result', async () => {
+        mockAiFetch(() => ['核心要点', 'Sources: S1', '链接:'].join('\n'));
+        mocks.getPoolQuery.mockResolvedValue({
+            rows: mockItems(1),
+        });
+
+        const result = await buildAiSummaryResponse(['feed-a'], 1);
+
+        expect(result.summary).toContain('Sources: S1');
+        expect(result.summary).toContain('来源链接：');
+        expect(result.summary).toContain('- S1 Title 1: https://example.com/items/1');
+        expect(result.summary).not.toContain('链接:');
     });
 
     it('requests one summary when fetched item count is at the batch limit', async () => {
@@ -161,5 +177,27 @@ describe('reader ai summary', () => {
         expect(result.summary).toBe('final summary');
         expect(result.prompt).toContain('batch 1 summary');
         expect(result.prompt).toContain('batch 2 summary');
+    });
+
+    it('adds source links from final source ids after batched summaries', async () => {
+        mockAiFetch((prompt) => {
+            if (prompt.includes('第 1/2 批')) {
+                return 'batch 1 summary\nSources: S1';
+            }
+            if (prompt.includes('第 2/2 批')) {
+                return 'batch 2 summary\nSources: S1001';
+            }
+            return 'final summary\nSources: S1, S1001\n链接:';
+        });
+        mocks.getPoolQuery.mockResolvedValue({
+            rows: mockItems(1001),
+        });
+
+        const result = await buildAiSummaryResponse(['feed-a'], 7);
+
+        expect(result.summary).toContain('Sources: S1, S1001');
+        expect(result.summary).toContain('- S1 Title 1: https://example.com/items/1');
+        expect(result.summary).toContain('- S1001 Title 1001: https://example.com/items/1001');
+        expect(result.summary).not.toContain('链接:');
     });
 });
