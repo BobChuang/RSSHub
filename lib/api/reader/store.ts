@@ -108,6 +108,7 @@ const pool = databaseUrl
           connectionString: databaseUrl,
       })
     : null;
+const multiAiSummaryPromptSettingKey = 'multi_ai_summary_prompt';
 
 let schemaReady: Promise<void> | undefined;
 
@@ -459,6 +460,12 @@ export async function ensureSchema() {
             ALTER TABLE reader_ai_summary_pushes
             ADD COLUMN IF NOT EXISTS last_item_pub_date_ms BIGINT NOT NULL DEFAULT 0;
 
+            CREATE TABLE IF NOT EXISTS reader_settings (
+                setting_key TEXT PRIMARY KEY,
+                setting_value TEXT NOT NULL DEFAULT '',
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            );
+
             CREATE TABLE IF NOT EXISTS reader_fetch_runs (
                 id BIGSERIAL PRIMARY KEY,
                 feed_id TEXT NOT NULL,
@@ -791,6 +798,34 @@ export async function updateFeedsAiSummaryPrompt(feedIds: string[], prompt: stri
         [ids, prompt]
     );
     return result.rowCount || 0;
+}
+
+async function getReaderSetting(settingKey: string) {
+    const result = await getPool().query('SELECT setting_value FROM reader_settings WHERE setting_key = $1', [settingKey]);
+    return result.rows[0]?.setting_value || '';
+}
+
+async function updateReaderSetting(settingKey: string, settingValue: string) {
+    const result = await getPool().query(
+        `
+            INSERT INTO reader_settings (setting_key, setting_value)
+            VALUES ($1, $2)
+            ON CONFLICT (setting_key) DO UPDATE SET
+                setting_value = EXCLUDED.setting_value,
+                updated_at = NOW()
+            RETURNING setting_value
+        `,
+        [settingKey, settingValue]
+    );
+    return result.rows[0]?.setting_value || '';
+}
+
+export function getMultiAiSummaryPrompt() {
+    return getReaderSetting(multiAiSummaryPromptSettingKey);
+}
+
+export function updateMultiAiSummaryPrompt(prompt: string) {
+    return updateReaderSetting(multiAiSummaryPromptSettingKey, prompt);
 }
 
 export async function getAiSummaryPushByFeedIds(feedIds: string[]) {

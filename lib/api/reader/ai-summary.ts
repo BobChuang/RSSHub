@@ -1,7 +1,7 @@
 import MarkdownIt from 'markdown-it';
 
 import type { ReaderAiSummaryPush, ReaderFeed, ReaderItem } from './store';
-import { getFeedsAiSummaryPrompt, getPool, rowToItem, updateFeedsAiSummaryPrompt } from './store';
+import { getFeedsAiSummaryPrompt, getMultiAiSummaryPrompt, getPool, rowToItem, updateFeedsAiSummaryPrompt, updateMultiAiSummaryPrompt } from './store';
 
 const markdown = MarkdownIt({
     breaks: true,
@@ -61,7 +61,6 @@ function limitText(value: string, maxLength: number) {
 
 function buildSummaryItemsText(items) {
     return items
-        .slice(0, 80)
         .map((item, index) => {
             const content = limitText(stripHtml(item.summary || item.description || ''), 420);
             const source = [item.feedGroup, item.feedTitle].filter(Boolean).join(' / ');
@@ -94,7 +93,7 @@ function renderSummaryPrompt(promptTemplate: string, items, days: number) {
         return prompt;
     }
 
-    return [prompt, '', `共收集到 ${items.length} 条，以下最多展示 80 条：`, itemsText].join('\n');
+    return [prompt, '', `共收集到 ${items.length} 条：`, itemsText].join('\n');
 }
 
 function renderSummaryMarkdown(value: string) {
@@ -115,7 +114,7 @@ async function getSummaryItems(feedIds: string[], days: number) {
             WHERE item.feed_id = ANY($1::text[])
                 AND item.pub_date_ms >= $2
             ORDER BY item.pub_date_ms DESC, item.id DESC
-            LIMIT 200
+            LIMIT 2000
         `,
         [feedIds, sinceMs]
     );
@@ -128,10 +127,12 @@ async function getSummaryItems(feedIds: string[], days: number) {
 
 export async function buildAiSummaryResponse(feedIds: string[], days: number, promptValue?: unknown, savePrompt?: boolean) {
     const submittedPrompt = normalizeSummaryPrompt(promptValue);
-    const defaultPrompt = feedIds.length > 1 ? defaultMultiAiSummaryPrompt : defaultAiSummaryPrompt;
-    const promptTemplate = submittedPrompt || (await getFeedsAiSummaryPrompt(feedIds)) || defaultPrompt;
+    const isSingleFeed = feedIds.length === 1;
+    const defaultPrompt = isSingleFeed ? defaultAiSummaryPrompt : defaultMultiAiSummaryPrompt;
+    const savedPrompt = isSingleFeed ? await getFeedsAiSummaryPrompt(feedIds) : await getMultiAiSummaryPrompt();
+    const promptTemplate = submittedPrompt || savedPrompt || defaultPrompt;
     if (savePrompt && submittedPrompt) {
-        await updateFeedsAiSummaryPrompt(feedIds, promptTemplate);
+        await (isSingleFeed ? updateFeedsAiSummaryPrompt(feedIds, promptTemplate) : updateMultiAiSummaryPrompt(promptTemplate));
     }
     const items = await getSummaryItems(feedIds, days);
     const prompt = renderSummaryPrompt(promptTemplate, items, days);

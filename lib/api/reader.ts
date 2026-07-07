@@ -10,6 +10,7 @@ import {
     ensureSchema,
     getAiSummaryPushByFeedIds,
     getFeedsLatestItemPubDateMs,
+    getMultiAiSummaryPrompt,
     getNextAiSummaryPushAt,
     getPool,
     listFeeds,
@@ -411,6 +412,8 @@ app.put('/ai-summary-pushes', async (ctx) => {
 
     return ctx.json(push);
 });
+
+app.get('/ai-summary-prompt', async (ctx) => ctx.json({ prompt: await getMultiAiSummaryPrompt() }));
 
 app.post('/feeds/:feedId/ai-summary', async (ctx) => {
     const body = await ctx.req.json();
