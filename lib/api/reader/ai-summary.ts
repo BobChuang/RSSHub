@@ -10,14 +10,12 @@ const markdown = MarkdownIt({
 });
 const larkMarkdownChunkLength = 4000;
 const summaryBatchItemLimit = 1000;
-const sourceUsageInstruction = '引用文章时必须保留 SourceID，格式为 Sources: S12, S45。不要输出空的“链接:”行；需要链接时只引用 SourceID，链接会由系统补全。';
-
-type SummarySource = {
-    id: string;
-    link: string;
-    source: string;
-    title: string;
-};
+const linkPreservationInstruction = [
+    '链接保留要求：',
+    '1. 每条具体内容如果引用原始文章，链接行必须紧跟对应内容下方，格式为：链接：<原始URL>。',
+    '2. 链接必须从输入内容的 Link 字段原样复制，不能留空、不能编造。',
+    '3. 如果某条内容没有可用链接，不要输出“链接：”行。',
+].join('\n');
 
 export const defaultAiSummaryPrompt = [
     '请用中文总结这个 RSS 订阅源最近 {{days}} 天的内容。',
@@ -68,43 +66,13 @@ function limitText(value: string, maxLength: number) {
     return value.length > maxLength ? value.slice(0, maxLength) + '...' : value;
 }
 
-function getSummarySourceId(index: number) {
-    return `S${index + 1}`;
-}
-
-function getSummaryItemSource(item) {
-    return [item.feedGroup, item.feedTitle].filter(Boolean).join(' / ');
-}
-
-function prepareSummaryItems(items) {
-    const sourceMap = new Map<string, SummarySource>();
-    const summaryItems = items.map((item, index) => {
-        const sourceId = getSummarySourceId(index);
-        const source = getSummaryItemSource(item);
-        if (item.link) {
-            sourceMap.set(sourceId, {
-                id: sourceId,
-                link: item.link,
-                source,
-                title: item.title || 'Untitled',
-            });
-        }
-        return {
-            ...item,
-            aiSummarySourceId: sourceId,
-        };
-    });
-    return { items: summaryItems, sourceMap };
-}
-
 function buildSummaryItemsText(items) {
     return items
         .map((item, index) => {
             const content = limitText(stripHtml(item.summary || item.description || ''), 420);
-            const source = getSummaryItemSource(item);
+            const source = [item.feedGroup, item.feedTitle].filter(Boolean).join(' / ');
             return [
                 `${index + 1}. ${item.title}`,
-                `SourceID: ${item.aiSummarySourceId || getSummarySourceId(index)}`,
                 source ? `Source: ${source}` : '',
                 item.author ? `Author: ${item.author}` : '',
                 item.pubDate ? `Date: ${item.pubDate}` : '',
@@ -115,6 +83,21 @@ function buildSummaryItemsText(items) {
                 .join('\n');
         })
         .join('\n\n');
+}
+
+function stripEmptyLinkLines(value: string) {
+    return value
+        .split('\n')
+        .filter((line) => !/^\s*(?:[-*]\s*)?(?:链接|Link)\s*[:：]\s*$/.test(line))
+        .join('\n')
+        .trim();
+}
+
+function withCleanSummaryLinks<T extends { summary: string }>(result: T) {
+    return {
+        ...result,
+        summary: result.summary ? stripEmptyLinkLines(result.summary) : result.summary,
+    };
 }
 
 function replacePromptToken(value: string, token: string, replacement: string) {
@@ -129,10 +112,10 @@ function renderSummaryPrompt(promptTemplate: string, items, days: number) {
     const prompt = replacePromptToken(promptWithItemCount, '{{items}}', itemsText);
 
     if (hasItemsPlaceholder) {
-        return [sourceUsageInstruction, '', prompt].join('\n');
+        return [linkPreservationInstruction, '', prompt].join('\n');
     }
 
-    return [prompt, '', sourceUsageInstruction, '', `共收集到 ${items.length} 条：`, itemsText].join('\n');
+    return [prompt, '', linkPreservationInstruction, '', `共收集到 ${items.length} 条：`, itemsText].join('\n');
 }
 
 function getBatches<T>(items: T[], batchSize: number) {
@@ -145,8 +128,8 @@ function getBatches<T>(items: T[], batchSize: number) {
 
 function renderBatchSummaryPrompt(promptTemplate: string, items, days: number, batchIndex: number, batchCount: number, itemCount: number) {
     return [
-        `这是第 ${batchIndex + 1}/${batchCount} 批内容，全部时间范围内共有 ${itemCount} 条。请先只总结本批，保留重要事实、频道和趋势，供最终汇总使用。`,
-        '每条重要结论必须带 Sources: Sxx；不要复写 URL，不要输出空的“链接:”行。',
+        `这是第 ${batchIndex + 1}/${batchCount} 批内容，全部时间范围内共有 ${itemCount} 条。请先只总结本批，保留重要事实、频道、链接和趋势，供最终汇总使用。`,
+        '本批输出里，具体内容的链接行必须紧跟对应内容下方，并从输入 Link 字段原样复制。',
         '',
         renderSummaryPrompt(promptTemplate, items, days),
     ].join('\n');
@@ -160,51 +143,18 @@ function renderFinalSummaryPrompt(promptTemplate: string, batchSummaries: string
 
     return [
         '下面是同一批 RSS 内容按 1000 条分批生成的中间总结。请基于全部中间总结生成最终总结，不要遗漏跨批次反复出现的趋势、重要频道和关键链接。',
-        '最终总结的每条重要结论必须保留批次摘要里的 Sources: Sxx。不要输出空的“链接:”行，链接会由系统根据 SourceID 自动补全。',
+        '最终总结引用某条具体内容时，链接行必须紧跟对应内容下方，并从批次摘要里原样复制。',
+        '不要输出空的“链接：”行；如果找不到对应链接，就不要列出这条具体内容。',
         '',
         '原始总结要求：',
         promptWithoutItems,
+        '',
+        linkPreservationInstruction,
         '',
         `原始内容总数：${itemCount} 条 / 分批数：${batchSummaries.length}`,
         '',
         summaryText,
     ].join('\n');
-}
-
-function getSummarySourceIds(value: string) {
-    const sourceIds = new Set<string>();
-    for (const match of value.matchAll(/\bS\d+\b/g)) {
-        sourceIds.add(match[0]);
-    }
-    return [...sourceIds].toSorted((left, right) => Number(left.slice(1)) - Number(right.slice(1)));
-}
-
-function stripEmptyLinkLines(value: string) {
-    return value
-        .split('\n')
-        .filter((line) => !/^\s*(?:[-*]\s*)?(?:链接|Link)\s*[:：]\s*$/.test(line))
-        .join('\n')
-        .trim();
-}
-
-function appendSummarySourceLinks(summary: string, sourceMap: Map<string, SummarySource>) {
-    const cleanSummary = stripEmptyLinkLines(summary);
-    const sourceIds = getSummarySourceIds(cleanSummary).filter((sourceId) => sourceMap.has(sourceId));
-    if (!sourceIds.length) {
-        return cleanSummary;
-    }
-    const sourceLinks = sourceIds.map((sourceId) => {
-        const source = sourceMap.get(sourceId);
-        return `- ${sourceId} ${source?.title || 'Untitled'}${source?.source ? ` (${source.source})` : ''}: ${source?.link || ''}`;
-    });
-    return [cleanSummary, '', '来源链接：', ...sourceLinks].join('\n');
-}
-
-function withSummarySourceLinks<T extends { summary: string }>(result: T, sourceMap: Map<string, SummarySource>) {
-    return {
-        ...result,
-        summary: result.summary ? appendSummarySourceLinks(result.summary, sourceMap) : result.summary,
-    };
 }
 
 function renderSummaryMarkdown(value: string) {
@@ -235,12 +185,12 @@ async function getSummaryItems(feedIds: string[], days: number) {
     }));
 }
 
-async function requestAiSummaryForItems(promptTemplate: string, items, days: number, sourceMap: Map<string, SummarySource>) {
+async function requestAiSummaryForItems(promptTemplate: string, items, days: number) {
     const batches = getBatches(items, summaryBatchItemLimit);
     if (batches.length <= 1) {
         const prompt = renderSummaryPrompt(promptTemplate, items, days);
         return {
-            ...withSummarySourceLinks(await requestAiSummary(prompt), sourceMap),
+            ...withCleanSummaryLinks(await requestAiSummary(prompt)),
             prompt,
         };
     }
@@ -250,7 +200,7 @@ async function requestAiSummaryForItems(promptTemplate: string, items, days: num
             const prompt = renderBatchSummaryPrompt(promptTemplate, batchItems, days, index, batches.length, items.length);
             return {
                 prompt,
-                result: await requestAiSummary(prompt),
+                result: withCleanSummaryLinks(await requestAiSummary(prompt)),
             };
         })
     );
@@ -265,7 +215,7 @@ async function requestAiSummaryForItems(promptTemplate: string, items, days: num
 
     const prompt = renderFinalSummaryPrompt(promptTemplate, batchSummaries, days, items.length);
     return {
-        ...withSummarySourceLinks(await requestAiSummary(prompt), sourceMap),
+        ...withCleanSummaryLinks(await requestAiSummary(prompt)),
         prompt,
     };
 }
@@ -280,13 +230,12 @@ export async function buildAiSummaryResponse(feedIds: string[], days: number, pr
         await (isSingleFeed ? updateFeedsAiSummaryPrompt(feedIds, promptTemplate) : updateMultiAiSummaryPrompt(promptTemplate));
     }
     const items = await getSummaryItems(feedIds, days);
-    const prepared = prepareSummaryItems(items);
-    const aiResult = prepared.items.length
-        ? await requestAiSummaryForItems(promptTemplate, prepared.items, days, prepared.sourceMap)
+    const aiResult = items.length
+        ? await requestAiSummaryForItems(promptTemplate, items, days)
         : {
               configured: Boolean((process.env.READER_AI_API_KEY || process.env.OPENAI_API_KEY) && process.env.READER_AI_MODEL),
               message: '',
-              prompt: renderSummaryPrompt(promptTemplate, prepared.items, days),
+              prompt: renderSummaryPrompt(promptTemplate, items, days),
               summary: '',
           };
 
