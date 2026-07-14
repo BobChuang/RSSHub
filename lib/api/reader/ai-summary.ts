@@ -334,7 +334,7 @@ function getWebhookKind(webhookUrl: string) {
     return 'generic';
 }
 
-type WebhookMessage = {
+export type WebhookMessage = {
     title: string;
     meta: string;
     body: string;
@@ -456,7 +456,7 @@ function getWebhookBody(push: ReaderAiSummaryPush, message: WebhookMessage) {
     };
 }
 
-async function postPushWebhook(push: ReaderAiSummaryPush, message: WebhookMessage) {
+export async function postPushWebhook(push: ReaderAiSummaryPush, message: WebhookMessage) {
     const response = await fetch(push.webhookUrl, {
         body: JSON.stringify(getWebhookBody(push, message)),
         headers: {

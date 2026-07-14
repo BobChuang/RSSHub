@@ -5,15 +5,26 @@ import type { ReaderAiSummaryPush, ReaderAiSummaryPushInput } from './store';
 const mocks = vi.hoisted(() => ({
     createAiSummaryPush: vi.fn(),
     deleteAiSummaryPush: vi.fn(),
+    detectProductEvents: vi.fn(),
     ensureSchema: vi.fn(),
     getAiSummaryPush: vi.fn(),
+    getOpenReaderEventCount: vi.fn(),
+    getReaderEvent: vi.fn(),
     listAiSummaryPushes: vi.fn(),
     listAiSummaryPushesByFeedIds: vi.fn(),
+    listReaderEvents: vi.fn(),
+    query: vi.fn(),
     updateAiSummaryPush: vi.fn(),
+    updateReaderEventStatus: vi.fn(),
 }));
 
 vi.mock('./scheduler', () => ({
     refreshFeed: vi.fn(),
+}));
+
+vi.mock('./event-detection', () => ({
+    defaultEventMonitorPrompt: 'Default event prompt.',
+    detectProductEvents: mocks.detectProductEvents,
 }));
 
 vi.mock('./store', () => ({
@@ -28,7 +39,9 @@ vi.mock('./store', () => ({
     getFeedsAiSummaryPrompt: vi.fn(),
     getMultiAiSummaryPrompt: vi.fn(),
     getNextAiSummaryPushAt: vi.fn(() => '2026-07-15T01:00:00.000Z'),
-    getPool: vi.fn(() => ({ query: vi.fn() })),
+    getOpenReaderEventCount: mocks.getOpenReaderEventCount,
+    getPool: vi.fn(() => ({ query: mocks.query })),
+    getReaderEvent: mocks.getReaderEvent,
     isValidAiSummaryPushTimezone: vi.fn((value) => {
         const timezone = String(value || '').trim();
         if (!timezone) {
@@ -44,10 +57,12 @@ vi.mock('./store', () => ({
     listAiSummaryPushes: mocks.listAiSummaryPushes,
     listAiSummaryPushesByFeedIds: mocks.listAiSummaryPushesByFeedIds,
     listFeeds: vi.fn(),
+    listReaderEvents: mocks.listReaderEvents,
     rowToItem: vi.fn((row) => row),
     updateAiSummaryPush: mocks.updateAiSummaryPush,
     updateFeed: vi.fn(),
     updateFeedItemsCategory: vi.fn(),
+    updateReaderEventStatus: mocks.updateReaderEventStatus,
     updateFeedsAiSummaryPrompt: vi.fn(),
     updateMultiAiSummaryPrompt: vi.fn(),
     upsertFeed: vi.fn(),
@@ -74,6 +89,8 @@ function createPush(overrides: Partial<ReaderAiSummaryPush> = {}): ReaderAiSumma
         lastSentAt: '',
         lastSentForDate: '',
         mode: 'summary',
+        minimumSeverity: 'medium',
+        dedupeMinutes: 10,
         nextSendAt: '2026-07-15T01:00:00.000Z',
         prompt: 'Summarize the feeds.',
         sendLockToken: '',
@@ -97,7 +114,9 @@ function pushFromInput(input: ReaderAiSummaryPushInput, id: string, current?: Re
         feedIds: input.feedIds,
         id,
         lastItemPubDateMs: input.lastItemPubDateMs || 0,
-        mode: input.mode === 'realtime' ? 'realtime' : 'summary',
+        mode: input.mode === 'realtime' || input.mode === 'event' ? input.mode : 'summary',
+        minimumSeverity: input.minimumSeverity === 'low' || input.minimumSeverity === 'high' ? input.minimumSeverity : 'medium',
+        dedupeMinutes: input.dedupeMinutes || 10,
         nextSendAt: input.nextSendAt || '',
         prompt: input.prompt || '',
         sendTime: input.sendTime || '09:00',
@@ -125,6 +144,9 @@ beforeEach(() => {
     pushSequence = 0;
     pushes = [];
     mocks.ensureSchema.mockResolvedValue(undefined);
+    mocks.getOpenReaderEventCount.mockResolvedValue(0);
+    mocks.query.mockResolvedValue({ rows: [] });
+    mocks.listReaderEvents.mockResolvedValue({ events: [], hasMore: false });
     mocks.listAiSummaryPushes.mockImplementation(() => pushes);
     mocks.listAiSummaryPushesByFeedIds.mockImplementation((feedIds: string[]) => pushes.filter((push) => sameFeedSet(push.feedIds, feedIds)));
     mocks.getAiSummaryPush.mockImplementation((pushId: string) => pushes.find((push) => push.id === pushId) || null);
@@ -152,6 +174,70 @@ beforeEach(() => {
         }
         pushes.splice(index, 1);
         return true;
+    });
+});
+
+describe('reader event API', () => {
+    it('lists open events and returns their count', async () => {
+        mocks.getOpenReaderEventCount.mockResolvedValue(3);
+
+        const listResponse = await jsonRequest('/events?status=open&limit=20&offset=0', 'GET');
+        const countResponse = await jsonRequest('/events/counts', 'GET');
+
+        expect(listResponse.status).toBe(200);
+        expect(await listResponse.json()).toEqual({ events: [], hasMore: false });
+        expect(mocks.listReaderEvents).toHaveBeenCalledWith({ limit: 20, offset: 0, search: undefined, status: 'open' });
+        expect(await countResponse.json()).toEqual({ open: 3 });
+    });
+
+    it('updates an event status', async () => {
+        mocks.updateReaderEventStatus.mockResolvedValue({ id: 'event-1', status: 'resolved' });
+
+        const response = await jsonRequest('/events/event-1', 'PATCH', { status: 'resolved' });
+
+        expect(response.status).toBe(200);
+        expect(await response.json()).toEqual({ id: 'event-1', status: 'resolved' });
+        expect(mocks.updateReaderEventStatus).toHaveBeenCalledWith('event-1', 'resolved');
+    });
+
+    it('previews event detection without creating an event', async () => {
+        mocks.query.mockResolvedValue({
+            rows: [
+                {
+                    author: 'Alice',
+                    description: 'Wallet cannot sync after the update.',
+                    id: 'item-1',
+                    link: 'https://example.com/item-1',
+                    source_title: 'Social feed',
+                    summary: 'Wallet cannot sync after the update.',
+                    title: 'Wallet sync failed',
+                },
+            ],
+        });
+        mocks.detectProductEvents.mockResolvedValue([
+            {
+                confidence: 0.93,
+                eventKey: 'wallet-sync-failed',
+                eventType: 'productBug',
+                isEvent: true,
+                itemId: 'item-1',
+                platform: 'extension',
+                severity: 'high',
+                summary: 'The wallet cannot sync after the update.',
+                title: 'Wallet sync failed',
+                version: '',
+            },
+        ]);
+
+        const response = await jsonRequest('/events/preview', 'POST', { feedIds: ['feed-a'], prompt: 'Monitor wallet errors.' });
+
+        expect(response.status).toBe(200);
+        expect(await response.json()).toMatchObject({
+            events: [{ itemAuthor: 'Alice', itemId: 'item-1', sourceTitle: 'Social feed' }],
+            inspectedCount: 1,
+        });
+        expect(mocks.detectProductEvents).toHaveBeenCalledWith({ prompt: 'Monitor wallet errors.' }, [expect.objectContaining({ id: 'item-1' })]);
+        expect(mocks.updateReaderEventStatus).not.toHaveBeenCalled();
     });
 });
 
@@ -300,6 +386,30 @@ describe('reader AI summary push API', () => {
 
         expect(updateResponse.status).toBe(200);
         expect(mocks.updateAiSummaryPush).toHaveBeenLastCalledWith(created.id, expect.objectContaining({ lastItemPubDateMs: 0 }), expectedRevision);
+    });
+
+    it('creates an event monitor with severity and dedupe settings', async () => {
+        const response = await jsonRequest('/ai-summary-pushes', 'POST', {
+            dedupeMinutes: 30,
+            enabled: true,
+            feedIds: ['feed-a'],
+            minimumSeverity: 'high',
+            mode: 'event',
+            prompt: 'Monitor wallet failures.',
+            webhookUrl: 'https://example.com/event-webhook',
+        });
+        const created = (await response.json()) as ReaderAiSummaryPush;
+
+        expect(response.status).toBe(201);
+        expect(created).toMatchObject({ dedupeMinutes: 30, minimumSeverity: 'high', mode: 'event' });
+        expect(mocks.createAiSummaryPush).toHaveBeenCalledWith(
+            expect.objectContaining({
+                cadence: 'daily',
+                dedupeMinutes: 30,
+                minimumSeverity: 'high',
+                mode: 'event',
+            })
+        );
     });
 
     it('returns 404 for an unknown push and deletes an existing push', async () => {

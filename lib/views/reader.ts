@@ -36,6 +36,10 @@ export const readerHtml = String.raw`<!doctype html>
                         <span>全部</span>
                         <strong data-category-count="all">0</strong>
                     </button>
+                    <button class="category-button event-category-button" type="button" data-category="events">
+                        <span>事件</span>
+                        <strong data-category-count="events">0</strong>
+                    </button>
                     <button class="category-button" type="button" data-category="articles">
                         <span>文章</span>
                         <strong data-category-count="articles">0</strong>
@@ -76,7 +80,7 @@ export const readerHtml = String.raw`<!doctype html>
                     <div class="search-wrap">
                         <input id="searchInput" type="search" autocomplete="off" placeholder="Search articles">
                     </div>
-                    <div class="read-filter" aria-label="Read status">
+                    <div id="readFilter" class="read-filter" aria-label="Read status">
                         <button class="read-filter-button active" type="button" data-read-filter="all">All</button>
                         <button class="read-filter-button" type="button" data-read-filter="unread">Unread</button>
                     </div>
@@ -204,7 +208,7 @@ export const readerHtml = String.raw`<!doctype html>
                             <div class="ai-summary-push-header">
                                 <div>
                                     <strong>推送任务</strong>
-                                    <small>可同时创建每日、每周和实时推送</small>
+                                    <small>可同时创建总结、原始实时推送和产品事件监控</small>
                                 </div>
                                 <button id="addAiSummaryPushButton" class="secondary-button compact-action-button" type="button">新增推送</button>
                             </div>
@@ -222,7 +226,8 @@ export const readerHtml = String.raw`<!doctype html>
                                         <span>推送类型</span>
                                         <select id="aiSummaryPushModeInput">
                                             <option value="summary">定时总结</option>
-                                            <option value="realtime">实时推送</option>
+                                            <option value="realtime">原始内容实时推送</option>
+                                            <option value="event">产品事件监控</option>
                                         </select>
                                     </label>
                                     <div id="aiSummaryPushScheduleFields" class="ai-summary-push-schedule-fields">
@@ -257,12 +262,35 @@ export const readerHtml = String.raw`<!doctype html>
                                             <input id="aiSummaryPushTimeInput" type="time" value="09:00">
                                         </label>
                                     </div>
+                                    <div id="aiSummaryPushEventFields" class="ai-summary-push-event-fields" hidden>
+                                        <label class="modal-field" for="aiSummaryPushMinimumSeverityInput">
+                                            <span>最低告警级别</span>
+                                            <select id="aiSummaryPushMinimumSeverityInput">
+                                                <option value="low">Low</option>
+                                                <option value="medium" selected>Medium</option>
+                                                <option value="high">High</option>
+                                            </select>
+                                        </label>
+                                        <label class="modal-field" for="aiSummaryPushDedupeMinutesInput">
+                                            <span>相似事件免打扰</span>
+                                            <select id="aiSummaryPushDedupeMinutesInput">
+                                                <option value="5">5 分钟</option>
+                                                <option value="10" selected>10 分钟</option>
+                                                <option value="30">30 分钟</option>
+                                                <option value="60">60 分钟</option>
+                                            </select>
+                                        </label>
+                                        <div class="ai-summary-push-preview">
+                                            <button id="previewAiSummaryPushButton" class="secondary-button compact-action-button" type="button">用最近 20 条测试</button>
+                                            <div id="aiSummaryPushPreviewResult" class="ai-summary-push-preview-result" aria-live="polite" hidden></div>
+                                        </div>
+                                    </div>
                                     <label class="modal-field ai-summary-push-webhook-field" for="aiSummaryWebhookInput">
                                         <span>Webhook</span>
                                         <input id="aiSummaryWebhookInput" type="url" placeholder="https://..." autocomplete="off">
                                     </label>
                                     <label class="modal-field ai-summary-push-prompt-field" for="aiSummaryPushPromptInput">
-                                        <span>推送提示词</span>
+                                        <span id="aiSummaryPushPromptLabel">推送提示词</span>
                                         <textarea id="aiSummaryPushPromptInput" rows="3" spellcheck="false"></textarea>
                                     </label>
                                 </div>

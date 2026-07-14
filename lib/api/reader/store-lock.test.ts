@@ -14,7 +14,7 @@ vi.mock('pg', () => ({
 
 vi.stubEnv('READER_DATABASE_URL', 'postgres://reader:test@localhost/reader');
 
-const { claimDueAiSummaryPushes, completeAiSummaryPush, failAiSummaryPush, renewAiSummaryPushLock, updateAiSummaryPush } = await import('./store');
+const { claimDueAiSummaryPushes, completeAiSummaryPush, createOrUpdateReaderEvent, failAiSummaryPush, renewAiSummaryPushLock, updateAiSummaryPush } = await import('./store');
 
 function createRow(sendLockToken = '') {
     return {
@@ -31,6 +31,7 @@ function createRow(sendLockToken = '') {
 }
 
 beforeEach(() => {
+    mocks.connect.mockReset();
     mocks.query.mockReset();
 });
 
@@ -102,5 +103,49 @@ describe('reader AI summary push send locks', () => {
         expect(sql).toContain('send_locked_until = NULL');
         expect(sql).toContain("send_lock_token = ''");
         expect(sql).toContain('AND (send_locked_until IS NULL OR send_locked_until <= NOW())');
+    });
+});
+
+describe('reader event deduplication', () => {
+    it('aggregates the same event key inside the configured window', async () => {
+        const currentEvent = {
+            confidence: 0.8,
+            event_key: 'wallet-sync-failed',
+            event_type: 'productBug',
+            feed_id: 'feed-a',
+            id: 'event-1',
+            item_id: 'item-1',
+            occurrence_count: 2,
+            push_id: 'push-1',
+            severity: 'medium',
+            status: 'open',
+            summary: 'Wallet sync is failing.',
+            title: 'Wallet sync failed',
+        };
+        const clientQuery = vi
+            .fn()
+            .mockResolvedValueOnce({ rows: [] })
+            .mockResolvedValueOnce({ rows: [{ id: 'push-1' }] })
+            .mockResolvedValueOnce({ rows: [] })
+            .mockResolvedValueOnce({ rows: [currentEvent] })
+            .mockResolvedValueOnce({ rows: [{ ...currentEvent, confidence: 0.95, occurrence_count: 3, severity: 'high' }] })
+            .mockResolvedValueOnce({ rows: [] })
+            .mockResolvedValueOnce({ rows: [] });
+        const release = vi.fn();
+        mocks.connect.mockResolvedValue({ query: clientQuery, release });
+
+        const result = await createOrUpdateReaderEvent({ dedupeMinutes: 10, id: 'push-1' }, 'feed-a', 'item-2', {
+            confidence: 0.95,
+            eventKey: 'wallet-sync-failed',
+            eventType: 'productBug',
+            severity: 'high',
+            summary: 'Wallet sync still fails after the update.',
+            title: 'Wallet sync failed after update',
+        });
+
+        expect(result).toMatchObject({ event: { confidence: 0.95, id: 'event-1', occurrenceCount: 3, severity: 'high' }, isNew: false });
+        expect(clientQuery.mock.calls[3][1]).toEqual(['push-1', 'wallet-sync-failed', 10]);
+        expect(clientQuery.mock.calls[5][1]).toEqual(['event-1', 'push-1', 'feed-a', 'item-2']);
+        expect(release).toHaveBeenCalledOnce();
     });
 });

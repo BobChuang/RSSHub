@@ -2,6 +2,7 @@ import { config } from '@/config';
 import logger from '@/utils/logger';
 
 import { sendAiSummaryPush, sendRealtimeItemsPush } from './ai-summary';
+import { processEventMonitorItems } from './event-detection';
 import { parseFeedText } from './feed-parser';
 import type { ReaderAiSummaryPush, ReaderFeed, ReaderItem } from './store';
 import {
@@ -14,6 +15,7 @@ import {
     getFollowingAiSummaryPushAt,
     getNextAiSummaryPushAt,
     hasReaderDatabase,
+    listEventAiSummaryPushesForFeed,
     listRealtimeAiSummaryPushesForFeed,
     persistDataItemsWithNewItems,
     recordFetchRun,
@@ -126,6 +128,25 @@ export async function sendRealtimePushes(feed: ReaderFeed, newItems: ReaderItem[
     );
 }
 
+export async function sendEventPushes(feed: ReaderFeed, newItems: ReaderItem[]) {
+    if (!newItems.length) {
+        return;
+    }
+    const pushes = await listEventAiSummaryPushesForFeed(feed.id);
+    await Promise.all(
+        pushes.map(async (push) => {
+            try {
+                await processEventMonitorItems(push, feed, newItems);
+                await recordRealtimeAiSummaryPushSuccess(push.id);
+            } catch (error) {
+                const message = error instanceof Error ? error.message : 'Unable to process event monitoring.';
+                await recordRealtimeAiSummaryPushFailure(push.id, message);
+                logger.warn(`Reader event monitoring failed for ${push.title || push.id}: ${message}`);
+            }
+        })
+    );
+}
+
 export async function refreshFeed(feedOrId: ReaderFeed | string) {
     await ensureSchema();
     const feed = typeof feedOrId === 'string' ? await getFeed(feedOrId) : feedOrId;
@@ -151,7 +172,7 @@ export async function refreshFeed(feedOrId: ReaderFeed | string) {
             lastError: '',
         });
         const { itemCount, newItems } = await persistDataItemsWithNewItems(savedFeed, data.item || []);
-        await sendRealtimePushes(savedFeed, newItems);
+        await Promise.all([sendRealtimePushes(savedFeed, newItems), sendEventPushes(savedFeed, newItems)]);
         await updateFeedFetchState(feed.id, {
             lastFetchedAt: startedAt,
             nextFetchAt: savedFeed.nextFetchAt,

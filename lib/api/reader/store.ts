@@ -44,8 +44,10 @@ export type ReaderFeed = {
     updatedAt: string;
 };
 
-export type ReaderAiSummaryPushMode = 'summary' | 'realtime';
+export type ReaderAiSummaryPushMode = 'summary' | 'realtime' | 'event';
 export type ReaderAiSummaryPushCadence = 'daily' | 'weekly';
+export type ReaderEventSeverity = 'low' | 'medium' | 'high';
+export type ReaderEventStatus = 'open' | 'resolved' | 'falsePositive';
 
 export type ReaderAiSummaryPush = {
     id: string;
@@ -58,6 +60,8 @@ export type ReaderAiSummaryPush = {
     webhookUrl: string;
     enabled: boolean;
     mode: ReaderAiSummaryPushMode;
+    minimumSeverity: ReaderEventSeverity;
+    dedupeMinutes: number;
     cadence: ReaderAiSummaryPushCadence;
     weekday: number;
     sendTime: string;
@@ -98,12 +102,45 @@ export type ReaderAiSummaryPushInput = {
     webhookUrl?: string;
     enabled?: boolean;
     mode?: string;
+    minimumSeverity?: string;
+    dedupeMinutes?: number;
     cadence?: string;
     weekday?: number;
     sendTime?: string;
     timezone?: string;
     nextSendAt?: string;
     lastItemPubDateMs?: number;
+};
+
+export type ReaderEventDetectionInput = {
+    eventKey: string;
+    eventType: string;
+    title: string;
+    summary: string;
+    severity: ReaderEventSeverity;
+    confidence: number;
+    platform?: string;
+    version?: string;
+};
+
+export type ReaderEvent = ReaderEventDetectionInput & {
+    id: string;
+    pushId: string;
+    feedId: string;
+    itemId: string;
+    status: ReaderEventStatus;
+    occurrenceCount: number;
+    firstSeenAt: string;
+    lastSeenAt: string;
+    notifiedAt: string;
+    sourceTitle: string;
+    sourceGroup: string;
+    itemTitle: string;
+    itemLink: string;
+    itemAuthor: string;
+    itemPubDate: string;
+    itemDescription: string;
+    itemSummary: string;
 };
 
 export type ReaderFeedPatch = Partial<Omit<ReaderFeedInput, 'id' | 'url'>> & {
@@ -219,7 +256,29 @@ function normalizeSummaryPushSendTime(value: unknown) {
 }
 
 function normalizeSummaryPushMode(value: unknown): ReaderAiSummaryPushMode {
-    return value === 'realtime' ? 'realtime' : 'summary';
+    return value === 'realtime' || value === 'event' ? value : 'summary';
+}
+
+export function normalizeReaderEventSeverity(value: unknown): ReaderEventSeverity {
+    return value === 'high' || value === 'low' ? value : 'medium';
+}
+
+function normalizeReaderEventStatus(value: unknown): ReaderEventStatus {
+    return value === 'resolved' || value === 'falsePositive' ? value : 'open';
+}
+
+function readerEventStatusToDatabase(value: unknown) {
+    return normalizeReaderEventStatus(value) === 'falsePositive' ? 'false_positive' : normalizeReaderEventStatus(value);
+}
+
+function normalizeEventDedupeMinutes(value: unknown) {
+    const minutes = Number(value);
+    return Number.isSafeInteger(minutes) ? Math.min(Math.max(minutes, 1), 24 * 60) : 10;
+}
+
+function normalizeEventConfidence(value: unknown) {
+    const confidence = Number(value);
+    return Number.isFinite(confidence) ? Math.min(Math.max(confidence, 0), 1) : 0;
 }
 
 function normalizeSummaryPushCadence(value: unknown): ReaderAiSummaryPushCadence {
@@ -390,6 +449,8 @@ export function rowToAiSummaryPush(row: QueryResultRow): ReaderAiSummaryPush {
         webhookUrl: row.webhook_url || '',
         enabled: row.enabled,
         mode: normalizeSummaryPushMode(row.mode),
+        minimumSeverity: normalizeReaderEventSeverity(row.minimum_severity),
+        dedupeMinutes: normalizeEventDedupeMinutes(row.dedupe_minutes),
         cadence: normalizeSummaryPushCadence(row.cadence),
         weekday: normalizeSummaryPushWeekday(row.weekday),
         sendTime: normalizeSummaryPushSendTime(row.send_time),
@@ -403,6 +464,36 @@ export function rowToAiSummaryPush(row: QueryResultRow): ReaderAiSummaryPush {
         sendLockToken: row.send_lock_token || '',
         createdAt: toIsoString(row.created_at),
         updatedAt: toIsoString(row.updated_at),
+    };
+}
+
+export function rowToReaderEvent(row: QueryResultRow): ReaderEvent {
+    return {
+        id: row.id,
+        pushId: row.push_id,
+        feedId: row.feed_id,
+        itemId: row.item_id,
+        eventKey: row.event_key || '',
+        eventType: row.event_type || 'productIssue',
+        title: row.title || '产品事件',
+        summary: row.summary || '',
+        severity: normalizeReaderEventSeverity(row.severity),
+        confidence: normalizeEventConfidence(row.confidence),
+        platform: row.platform || '',
+        version: row.version || '',
+        status: normalizeReaderEventStatus(row.status === 'false_positive' ? 'falsePositive' : row.status),
+        occurrenceCount: Math.max(Number(row.occurrence_count) || 1, 1),
+        firstSeenAt: toIsoString(row.first_seen_at),
+        lastSeenAt: toIsoString(row.last_seen_at),
+        notifiedAt: toIsoString(row.notified_at),
+        sourceTitle: row.source_title || '',
+        sourceGroup: row.source_group || '',
+        itemTitle: row.item_title || '',
+        itemLink: row.item_link || '',
+        itemAuthor: row.item_author || '',
+        itemPubDate: row.item_pub_date || '',
+        itemDescription: row.item_description || '',
+        itemSummary: row.item_summary || '',
     };
 }
 
@@ -525,6 +616,8 @@ export async function ensureSchema() {
                 webhook_url TEXT NOT NULL DEFAULT '',
                 enabled BOOLEAN NOT NULL DEFAULT FALSE,
                 mode TEXT NOT NULL DEFAULT 'summary',
+                minimum_severity TEXT NOT NULL DEFAULT 'medium',
+                dedupe_minutes INTEGER NOT NULL DEFAULT 10,
                 cadence TEXT NOT NULL DEFAULT 'daily' CONSTRAINT reader_ai_summary_pushes_cadence_check CHECK (cadence IN ('daily', 'weekly')),
                 weekday INTEGER NOT NULL DEFAULT 1 CONSTRAINT reader_ai_summary_pushes_weekday_check CHECK (weekday BETWEEN 0 AND 6),
                 send_time TEXT NOT NULL DEFAULT '09:00',
@@ -544,6 +637,12 @@ export async function ensureSchema() {
             ADD COLUMN IF NOT EXISTS mode TEXT NOT NULL DEFAULT 'summary';
 
             ALTER TABLE reader_ai_summary_pushes
+            ADD COLUMN IF NOT EXISTS minimum_severity TEXT NOT NULL DEFAULT 'medium';
+
+            ALTER TABLE reader_ai_summary_pushes
+            ADD COLUMN IF NOT EXISTS dedupe_minutes INTEGER NOT NULL DEFAULT 10;
+
+            ALTER TABLE reader_ai_summary_pushes
             ADD COLUMN IF NOT EXISTS last_item_pub_date_ms BIGINT NOT NULL DEFAULT 0;
 
             ALTER TABLE reader_ai_summary_pushes
@@ -560,6 +659,14 @@ export async function ensureSchema() {
 
             ALTER TABLE reader_ai_summary_pushes
             ADD COLUMN IF NOT EXISTS send_lock_token TEXT NOT NULL DEFAULT '';
+
+            UPDATE reader_ai_summary_pushes
+            SET minimum_severity = 'medium'
+            WHERE minimum_severity NOT IN ('low', 'medium', 'high');
+
+            UPDATE reader_ai_summary_pushes
+            SET dedupe_minutes = 10
+            WHERE dedupe_minutes < 1 OR dedupe_minutes > 1440;
 
             UPDATE reader_ai_summary_pushes
             SET cadence = 'daily'
@@ -625,6 +732,37 @@ export async function ensureSchema() {
                 PRIMARY KEY (guild_id, author)
             );
 
+            CREATE TABLE IF NOT EXISTS reader_events (
+                id TEXT PRIMARY KEY,
+                push_id TEXT NOT NULL REFERENCES reader_ai_summary_pushes(id) ON DELETE CASCADE,
+                feed_id TEXT NOT NULL,
+                item_id TEXT NOT NULL,
+                event_key TEXT NOT NULL,
+                event_type TEXT NOT NULL DEFAULT 'productIssue',
+                title TEXT NOT NULL,
+                summary TEXT NOT NULL DEFAULT '',
+                severity TEXT NOT NULL DEFAULT 'medium',
+                confidence DOUBLE PRECISION NOT NULL DEFAULT 0,
+                platform TEXT NOT NULL DEFAULT '',
+                version TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'open',
+                occurrence_count INTEGER NOT NULL DEFAULT 1,
+                first_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                last_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                notified_at TIMESTAMPTZ,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            );
+
+            CREATE TABLE IF NOT EXISTS reader_event_occurrences (
+                event_id TEXT NOT NULL REFERENCES reader_events(id) ON DELETE CASCADE,
+                push_id TEXT NOT NULL,
+                feed_id TEXT NOT NULL,
+                item_id TEXT NOT NULL,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                PRIMARY KEY (push_id, item_id)
+            );
+
             CREATE INDEX IF NOT EXISTS reader_items_pub_date_ms_idx ON reader_items (pub_date_ms DESC);
             CREATE INDEX IF NOT EXISTS reader_items_feed_pub_date_idx ON reader_items (feed_id, pub_date_ms DESC);
             CREATE INDEX IF NOT EXISTS reader_items_category_pub_date_idx ON reader_items (category, pub_date_ms DESC);
@@ -635,6 +773,9 @@ export async function ensureSchema() {
             CREATE INDEX IF NOT EXISTS reader_ai_summary_pushes_feed_set_key_idx ON reader_ai_summary_pushes (feed_set_key);
             CREATE INDEX IF NOT EXISTS reader_feeds_next_fetch_idx ON reader_feeds (server_sync_enabled, paused, next_fetch_at);
             CREATE INDEX IF NOT EXISTS reader_fetch_runs_feed_started_idx ON reader_fetch_runs (feed_id, started_at DESC);
+            CREATE INDEX IF NOT EXISTS reader_events_status_last_seen_idx ON reader_events (status, last_seen_at DESC);
+            CREATE INDEX IF NOT EXISTS reader_events_dedupe_idx ON reader_events (push_id, event_key, last_seen_at DESC);
+            CREATE INDEX IF NOT EXISTS reader_event_occurrences_event_idx ON reader_event_occurrences (event_id, created_at DESC);
 
             UPDATE reader_items
             SET category = 'chat', updated_at = NOW()
@@ -809,6 +950,8 @@ function aiSummaryPushValues(push: ReaderAiSummaryPushInput) {
         String(push.webhookUrl || '').trim(),
         enabled,
         mode,
+        normalizeReaderEventSeverity(push.minimumSeverity),
+        normalizeEventDedupeMinutes(push.dedupeMinutes),
         cadence,
         weekday,
         sendTime,
@@ -852,9 +995,10 @@ export async function createAiSummaryPush(push: ReaderAiSummaryPushInput) {
         `
             INSERT INTO reader_ai_summary_pushes (
                 id, feed_ids, feed_set_key, title, days, prompt, webhook_url, enabled, mode,
-                cadence, weekday, send_time, timezone, next_send_at, last_item_pub_date_ms
+                minimum_severity, dedupe_minutes, cadence, weekday, send_time, timezone,
+                next_send_at, last_item_pub_date_ms
             )
-            VALUES ($1, $2::jsonb, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+            VALUES ($1, $2::jsonb, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
             RETURNING *
         `,
         aiSummaryPushValues(push)
@@ -876,19 +1020,21 @@ export async function updateAiSummaryPush(pushId: string, push: ReaderAiSummaryP
                 webhook_url = $7,
                 enabled = $8,
                 mode = $9,
-                cadence = $10,
-                weekday = $11,
-                send_time = $12,
-                timezone = $13,
-                next_send_at = $14,
-                last_item_pub_date_ms = $15,
+                minimum_severity = $10,
+                dedupe_minutes = $11,
+                cadence = $12,
+                weekday = $13,
+                send_time = $14,
+                timezone = $15,
+                next_send_at = $16,
+                last_item_pub_date_ms = $17,
                 config_revision = config_revision + 1,
                 last_error = '',
                 send_locked_until = NULL,
                 send_lock_token = '',
                 updated_at = NOW()
             WHERE id = $1
-                AND config_revision = $16
+                AND config_revision = $18
                 AND (send_locked_until IS NULL OR send_locked_until <= NOW())
             RETURNING *
         `,
@@ -1048,6 +1194,242 @@ export async function listRealtimeAiSummaryPushesForFeed(feedId: string) {
         [feedId]
     );
     return result.rows.map((row) => rowToAiSummaryPush(row));
+}
+
+export async function listEventAiSummaryPushesForFeed(feedId: string) {
+    const result = await getPool().query(
+        `
+            SELECT *
+            FROM reader_ai_summary_pushes
+            WHERE enabled = TRUE
+                AND mode = 'event'
+                AND webhook_url <> ''
+                AND feed_ids ? $1
+            ORDER BY created_at ASC
+        `,
+        [feedId]
+    );
+    return result.rows.map((row) => rowToAiSummaryPush(row));
+}
+
+function readerEventSeverityRank(value: unknown) {
+    return {
+        high: 3,
+        low: 1,
+        medium: 2,
+    }[normalizeReaderEventSeverity(value)];
+}
+
+const readerEventSelect = `
+    SELECT
+        event.*,
+        feed.title AS source_title,
+        feed.group_name AS source_group,
+        item.title AS item_title,
+        item.link AS item_link,
+        item.author AS item_author,
+        item.pub_date AS item_pub_date,
+        item.description AS item_description,
+        item.summary AS item_summary
+    FROM reader_events event
+    LEFT JOIN reader_feeds feed ON feed.id = event.feed_id
+    LEFT JOIN reader_items item ON item.id = event.item_id
+`;
+
+export async function createOrUpdateReaderEvent(push: Pick<ReaderAiSummaryPush, 'dedupeMinutes' | 'id'>, feedId: string, itemId: string, detection: ReaderEventDetectionInput) {
+    const client = await getPool().connect();
+    try {
+        await client.query('BEGIN');
+        await client.query('SELECT id FROM reader_ai_summary_pushes WHERE id = $1 FOR UPDATE', [push.id]);
+
+        const existingOccurrence = await client.query(
+            `
+                ${readerEventSelect}
+                JOIN reader_event_occurrences occurrence ON occurrence.event_id = event.id
+                WHERE occurrence.push_id = $1
+                    AND occurrence.item_id = $2
+                LIMIT 1
+            `,
+            [push.id, itemId]
+        );
+        if (existingOccurrence.rows[0]) {
+            await client.query('COMMIT');
+            return { event: rowToReaderEvent(existingOccurrence.rows[0]), isNew: false };
+        }
+
+        const eventKey = String(detection.eventKey || detection.title || itemId)
+            .trim()
+            .slice(0, 200);
+        const current = await client.query(
+            `
+                SELECT *
+                FROM reader_events
+                WHERE push_id = $1
+                    AND event_key = $2
+                    AND status = 'open'
+                    AND last_seen_at >= NOW() - ($3::text || ' minutes')::interval
+                ORDER BY last_seen_at DESC
+                LIMIT 1
+                FOR UPDATE
+            `,
+            [push.id, eventKey, normalizeEventDedupeMinutes(push.dedupeMinutes)]
+        );
+
+        let eventRow;
+        let isNew = false;
+        if (current.rows[0]) {
+            const currentEvent = current.rows[0];
+            const replaceDetails = readerEventSeverityRank(detection.severity) > readerEventSeverityRank(currentEvent.severity) || normalizeEventConfidence(detection.confidence) > normalizeEventConfidence(currentEvent.confidence);
+            const updated = await client.query(
+                `
+                    UPDATE reader_events
+                    SET
+                        event_type = CASE WHEN $2 THEN $3 ELSE event_type END,
+                        title = CASE WHEN $2 THEN $4 ELSE title END,
+                        summary = CASE WHEN $2 THEN $5 ELSE summary END,
+                        severity = CASE WHEN $6 > $7 THEN $8 ELSE severity END,
+                        confidence = GREATEST(confidence, $9),
+                        platform = CASE WHEN $2 THEN $10 ELSE platform END,
+                        version = CASE WHEN $2 THEN $11 ELSE version END,
+                        occurrence_count = occurrence_count + 1,
+                        last_seen_at = NOW(),
+                        updated_at = NOW()
+                    WHERE id = $1
+                    RETURNING *
+                `,
+                [
+                    currentEvent.id,
+                    replaceDetails,
+                    String(detection.eventType || 'productIssue').slice(0, 80),
+                    String(detection.title || '产品事件').slice(0, 240),
+                    String(detection.summary || '').slice(0, 2000),
+                    readerEventSeverityRank(detection.severity),
+                    readerEventSeverityRank(currentEvent.severity),
+                    normalizeReaderEventSeverity(detection.severity),
+                    normalizeEventConfidence(detection.confidence),
+                    String(detection.platform || '').slice(0, 120),
+                    String(detection.version || '').slice(0, 120),
+                ]
+            );
+            eventRow = updated.rows[0];
+        } else {
+            const created = await client.query(
+                `
+                    INSERT INTO reader_events (
+                        id, push_id, feed_id, item_id, event_key, event_type, title, summary,
+                        severity, confidence, platform, version
+                    )
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+                    RETURNING *
+                `,
+                [
+                    randomUUID(),
+                    push.id,
+                    feedId,
+                    itemId,
+                    eventKey,
+                    String(detection.eventType || 'productIssue').slice(0, 80),
+                    String(detection.title || '产品事件').slice(0, 240),
+                    String(detection.summary || '').slice(0, 2000),
+                    normalizeReaderEventSeverity(detection.severity),
+                    normalizeEventConfidence(detection.confidence),
+                    String(detection.platform || '').slice(0, 120),
+                    String(detection.version || '').slice(0, 120),
+                ]
+            );
+            eventRow = created.rows[0];
+            isNew = true;
+        }
+
+        await client.query(
+            `
+                INSERT INTO reader_event_occurrences (event_id, push_id, feed_id, item_id)
+                VALUES ($1, $2, $3, $4)
+            `,
+            [eventRow.id, push.id, feedId, itemId]
+        );
+        await client.query('COMMIT');
+        return { event: rowToReaderEvent(eventRow), isNew };
+    } catch (error) {
+        await client.query('ROLLBACK');
+        throw error;
+    } finally {
+        client.release();
+    }
+}
+
+export async function markReaderEventNotified(eventId: string) {
+    const result = await getPool().query(
+        `
+            UPDATE reader_events
+            SET notified_at = NOW(), updated_at = NOW()
+            WHERE id = $1
+            RETURNING *
+        `,
+        [eventId]
+    );
+    return result.rows[0] ? rowToReaderEvent(result.rows[0]) : null;
+}
+
+export async function listReaderEvents(options: { limit?: number; offset?: number; search?: string; status?: ReaderEventStatus | 'all' } = {}) {
+    const where: string[] = [];
+    const values: Array<number | string> = [];
+    if (options.status && options.status !== 'all') {
+        values.push(readerEventStatusToDatabase(options.status));
+        where.push(`event.status = $${values.length}`);
+    }
+    if (options.search) {
+        values.push(`%${options.search.toLowerCase()}%`);
+        where.push(`LOWER(CONCAT_WS(' ', event.title, event.summary, event.event_type, event.platform, event.version, item.title, item.author, feed.title)) LIKE $${values.length}`);
+    }
+    const requestedLimit = Math.trunc(Number(options.limit)) || 50;
+    const requestedOffset = Math.trunc(Number(options.offset)) || 0;
+    const limit = Math.min(Math.max(requestedLimit, 1), 100);
+    const offset = Math.max(requestedOffset, 0);
+    values.push(limit + 1);
+    const limitPlaceholder = `$${values.length}`;
+    values.push(offset);
+    const offsetPlaceholder = `$${values.length}`;
+    const result = await getPool().query(
+        `
+            ${readerEventSelect}
+            ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
+            ORDER BY event.last_seen_at DESC, event.id DESC
+            LIMIT ${limitPlaceholder}
+            OFFSET ${offsetPlaceholder}
+        `,
+        values
+    );
+    return {
+        events: result.rows.slice(0, limit).map((row) => rowToReaderEvent(row)),
+        hasMore: result.rows.length > limit,
+    };
+}
+
+export async function getReaderEvent(eventId: string) {
+    const result = await getPool().query(`${readerEventSelect} WHERE event.id = $1`, [eventId]);
+    return result.rows[0] ? rowToReaderEvent(result.rows[0]) : null;
+}
+
+export async function getOpenReaderEventCount() {
+    const result = await getPool().query("SELECT COUNT(*)::int AS count FROM reader_events WHERE status = 'open'");
+    return Number(result.rows[0]?.count) || 0;
+}
+
+export async function updateReaderEventStatus(eventId: string, status: ReaderEventStatus) {
+    const result = await getPool().query(
+        `
+            UPDATE reader_events
+            SET status = $2, updated_at = NOW()
+            WHERE id = $1
+            RETURNING *
+        `,
+        [eventId, readerEventStatusToDatabase(status)]
+    );
+    if (!result.rows[0]) {
+        return null;
+    }
+    return getReaderEvent(eventId);
 }
 
 export async function updateFeedItemsCategory(feedId: string, category: string) {

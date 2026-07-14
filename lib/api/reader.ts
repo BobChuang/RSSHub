@@ -1,6 +1,7 @@
 import { Hono } from 'hono';
 
 import { buildAiSummaryResponse, normalizeSummaryDays, normalizeSummaryFeedIds } from './reader/ai-summary';
+import { defaultEventMonitorPrompt, detectProductEvents } from './reader/event-detection';
 import { refreshFeed } from './reader/scheduler';
 import {
     createAiSummaryPush,
@@ -13,15 +14,19 @@ import {
     getDefaultAiSummaryPushTimezone,
     getMultiAiSummaryPrompt,
     getNextAiSummaryPushAt,
+    getOpenReaderEventCount,
     getPool,
+    getReaderEvent,
     isValidAiSummaryPushTimezone,
     listAiSummaryPushes,
     listAiSummaryPushesByFeedIds,
     listFeeds,
+    listReaderEvents,
     rowToItem,
     updateAiSummaryPush,
     updateFeed,
     updateFeedItemsCategory,
+    updateReaderEventStatus,
     upsertFeed,
     upsertItems,
 } from './reader/store';
@@ -140,7 +145,20 @@ function normalizeAiSummaryPushSendTime(value: unknown) {
 }
 
 function normalizeAiSummaryPushMode(value: unknown) {
-    return value === 'realtime' ? 'realtime' : 'summary';
+    return value === 'realtime' || value === 'event' ? value : 'summary';
+}
+
+function normalizeReaderEventSeverity(value: unknown) {
+    return value === 'low' || value === 'high' ? value : 'medium';
+}
+
+function normalizeEventDedupeMinutes(value: unknown) {
+    const minutes = Number(value);
+    return Number.isSafeInteger(minutes) ? Math.min(Math.max(minutes, 1), 24 * 60) : 10;
+}
+
+function normalizeReaderEventStatus(value: unknown) {
+    return value === 'resolved' || value === 'falsePositive' ? value : 'open';
 }
 
 function normalizeAiSummaryPushCadence(value: unknown) {
@@ -182,8 +200,8 @@ function getAiSummaryPushValidationError(body, partial = false) {
     if (Array.isArray(body.feedIds) && body.feedIds.length > 100) {
         return 'feedIds must contain at most 100 feed IDs.';
     }
-    if (body.mode !== undefined && body.mode !== 'summary' && body.mode !== 'realtime') {
-        return 'mode must be either "summary" or "realtime".';
+    if (body.mode !== undefined && body.mode !== 'summary' && body.mode !== 'realtime' && body.mode !== 'event') {
+        return 'mode must be "summary", "realtime", or "event".';
     }
     if (body.cadence !== undefined && body.cadence !== 'daily' && body.cadence !== 'weekly') {
         return 'cadence must be either "daily" or "weekly".';
@@ -219,6 +237,12 @@ function getAiSummaryPushValidationError(body, partial = false) {
     }
     if (body.prompt !== undefined && typeof body.prompt !== 'string') {
         return 'prompt must be a string.';
+    }
+    if (body.minimumSeverity !== undefined && !['low', 'medium', 'high'].includes(body.minimumSeverity)) {
+        return 'minimumSeverity must be "low", "medium", or "high".';
+    }
+    if (body.dedupeMinutes !== undefined && (!Number.isSafeInteger(body.dedupeMinutes) || body.dedupeMinutes < 1 || body.dedupeMinutes > 1440)) {
+        return 'dedupeMinutes must be an integer from 1 through 1440.';
     }
 }
 
@@ -435,6 +459,88 @@ app.patch('/items/:id', async (ctx) => {
     return ctx.json(result.rows[0] ? rowToItem(result.rows[0]) : null);
 });
 
+app.get('/events', async (ctx) => {
+    const statusValue = ctx.req.query('status');
+    const status = statusValue === 'all' ? 'all' : normalizeReaderEventStatus(statusValue);
+    const limit = normalizeLimit(ctx.req.query('limit'));
+    const offset = normalizeOffset(ctx.req.query('offset'));
+    return ctx.json(
+        await listReaderEvents({
+            limit,
+            offset,
+            search: ctx.req.query('search')?.trim(),
+            status,
+        })
+    );
+});
+
+app.get('/events/counts', async (ctx) => ctx.json({ open: await getOpenReaderEventCount() }));
+
+app.post('/events/preview', async (ctx) => {
+    const body = await ctx.req.json();
+    if (!body || typeof body !== 'object' || !Array.isArray(body.feedIds)) {
+        return ctx.json({ error: 'feedIds must be an array of feed IDs.' }, 400);
+    }
+    if (body.feedIds.length > 100 || body.feedIds.some((feedId) => typeof feedId !== 'string' || !feedId.trim())) {
+        return ctx.json({ error: 'feedIds must contain from 1 to 100 non-empty feed IDs.' }, 400);
+    }
+    if (body.prompt !== undefined && typeof body.prompt !== 'string') {
+        return ctx.json({ error: 'prompt must be a string.' }, 400);
+    }
+    const feedIds = normalizeSummaryFeedIds(body.feedIds);
+    if (!feedIds.length) {
+        return ctx.json({ error: 'feedIds must contain at least one feed ID.' }, 400);
+    }
+    const result = await getPool().query(
+        `
+            SELECT items.*, feeds.title AS source_title
+            FROM reader_items items
+            LEFT JOIN reader_feeds feeds ON feeds.id = items.feed_id
+            WHERE items.feed_id = ANY($1::text[])
+            ORDER BY items.pub_date_ms DESC, items.id DESC
+            LIMIT 20
+        `,
+        [feedIds]
+    );
+    const items = result.rows.map((row) => rowToItem(row));
+    const itemById = new Map(result.rows.map((row, index) => [items[index].id, { item: items[index], sourceTitle: row.source_title || '' }]));
+    const prompt = typeof body.prompt === 'string' ? body.prompt.trim() : '';
+    const detections = await detectProductEvents({ prompt: prompt || defaultEventMonitorPrompt }, items);
+    return ctx.json({
+        events: detections.map((detection) => {
+            const source = itemById.get(detection.itemId);
+            return {
+                ...detection,
+                itemAuthor: source?.item.author || '',
+                itemLink: source?.item.link || '',
+                itemText: source?.item.summary || source?.item.description || source?.item.title || '',
+                sourceTitle: source?.sourceTitle || '',
+            };
+        }),
+        inspectedCount: items.length,
+    });
+});
+
+app.get('/events/:id', async (ctx) => {
+    const event = await getReaderEvent(ctx.req.param('id'));
+    if (!event) {
+        return ctx.json({ error: 'Reader event not found.' }, 404);
+    }
+    return ctx.json(event);
+});
+
+app.patch('/events/:id', async (ctx) => {
+    const body = await ctx.req.json();
+    if (!['open', 'resolved', 'falsePositive'].includes(body.status)) {
+        return ctx.json({ error: 'status must be "open", "resolved", or "falsePositive".' }, 400);
+    }
+    const event = await updateReaderEventStatus(ctx.req.param('id'), normalizeReaderEventStatus(body.status));
+    if (!event) {
+        return ctx.json({ error: 'Reader event not found.' }, 404);
+    }
+    return ctx.json(event);
+});
+
 app.get('/ai-summary-pushes', async (ctx) => ctx.json({ pushes: await listAiSummaryPushes() }));
 
 app.post('/ai-summary-pushes/lookup', async (ctx) => {
@@ -466,7 +572,7 @@ app.post('/ai-summary-pushes', async (ctx) => {
     const enabled = body.enabled === true;
     const mode = normalizeAiSummaryPushMode(body.mode);
     const cadence = normalizeAiSummaryPushCadence(body.cadence);
-    if (mode === 'realtime' && cadence === 'weekly') {
+    if (mode !== 'summary' && cadence === 'weekly') {
         return ctx.json({ error: 'cadence "weekly" is only available for summary pushes.' }, 400);
     }
     const webhookUrl = normalizeAiSummaryWebhookUrl(body.webhookUrl);
@@ -483,6 +589,8 @@ app.post('/ai-summary-pushes', async (ctx) => {
         enabled,
         feedIds,
         lastItemPubDateMs: 0,
+        minimumSeverity: normalizeReaderEventSeverity(body.minimumSeverity),
+        dedupeMinutes: normalizeEventDedupeMinutes(body.dedupeMinutes),
         mode,
         nextSendAt: mode === 'summary' ? getInitialAiSummaryPushNextSendAt(sendTime, cadence, weekday, timezone, enabled) : undefined,
         prompt: typeof body.prompt === 'string' ? body.prompt : '',
@@ -514,10 +622,10 @@ app.patch('/ai-summary-pushes/:id', async (ctx) => {
     const enabled = body.enabled === undefined ? current.enabled : body.enabled;
     const mode = body.mode === undefined ? current.mode : normalizeAiSummaryPushMode(body.mode);
     const requestedCadence = body.cadence === undefined ? current.cadence : normalizeAiSummaryPushCadence(body.cadence);
-    if (mode === 'realtime' && body.cadence === 'weekly') {
+    if (mode !== 'summary' && body.cadence === 'weekly') {
         return ctx.json({ error: 'cadence "weekly" is only available for summary pushes.' }, 400);
     }
-    const cadence = mode === 'realtime' ? 'daily' : requestedCadence;
+    const cadence = mode === 'summary' ? requestedCadence : 'daily';
     const weekday = body.weekday === undefined ? current.weekday : normalizeAiSummaryPushWeekday(body.weekday);
     const sendTime = body.sendTime === undefined ? current.sendTime : normalizeAiSummaryPushSendTime(body.sendTime);
     const timezone = body.timezone === undefined ? current.timezone : normalizeAiSummaryPushTimezone(body.timezone);
@@ -537,6 +645,8 @@ app.patch('/ai-summary-pushes/:id', async (ctx) => {
             enabled,
             feedIds,
             lastItemPubDateMs: mode === 'realtime' && !resetRealtimeCursor ? current.lastItemPubDateMs : 0,
+            minimumSeverity: body.minimumSeverity === undefined ? current.minimumSeverity : normalizeReaderEventSeverity(body.minimumSeverity),
+            dedupeMinutes: body.dedupeMinutes === undefined ? current.dedupeMinutes : normalizeEventDedupeMinutes(body.dedupeMinutes),
             mode,
             nextSendAt,
             prompt: body.prompt === undefined ? current.prompt : body.prompt,

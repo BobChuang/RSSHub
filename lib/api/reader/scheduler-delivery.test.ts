@@ -7,7 +7,9 @@ const mocks = vi.hoisted(() => ({
     failAiSummaryPush: vi.fn(),
     getFollowingAiSummaryPushAt: vi.fn(),
     getNextAiSummaryPushAt: vi.fn(),
+    listEventAiSummaryPushesForFeed: vi.fn(),
     listRealtimeAiSummaryPushesForFeed: vi.fn(),
+    processEventMonitorItems: vi.fn(),
     recordRealtimeAiSummaryPushFailure: vi.fn(),
     recordRealtimeAiSummaryPushSuccess: vi.fn(),
     renewAiSummaryPushLock: vi.fn(),
@@ -39,6 +41,10 @@ vi.mock('./ai-summary', () => ({
     sendRealtimeItemsPush: mocks.sendRealtimeItemsPush,
 }));
 
+vi.mock('./event-detection', () => ({
+    processEventMonitorItems: mocks.processEventMonitorItems,
+}));
+
 vi.mock('./store', () => ({
     claimDueAiSummaryPushes: vi.fn(),
     claimDueFeeds: vi.fn(),
@@ -49,6 +55,7 @@ vi.mock('./store', () => ({
     getFollowingAiSummaryPushAt: mocks.getFollowingAiSummaryPushAt,
     getNextAiSummaryPushAt: mocks.getNextAiSummaryPushAt,
     hasReaderDatabase: vi.fn(() => false),
+    listEventAiSummaryPushesForFeed: mocks.listEventAiSummaryPushesForFeed,
     listRealtimeAiSummaryPushesForFeed: mocks.listRealtimeAiSummaryPushesForFeed,
     persistDataItemsWithNewItems: vi.fn(),
     recordFetchRun: vi.fn(),
@@ -59,7 +66,7 @@ vi.mock('./store', () => ({
     upsertFeed: vi.fn(),
 }));
 
-const { sendDueAiSummaryPush, sendRealtimePushes } = await import('./scheduler');
+const { sendDueAiSummaryPush, sendEventPushes, sendRealtimePushes } = await import('./scheduler');
 
 function createPush(overrides: Partial<ReaderAiSummaryPush> = {}): ReaderAiSummaryPush {
     return {
@@ -76,6 +83,8 @@ function createPush(overrides: Partial<ReaderAiSummaryPush> = {}): ReaderAiSumma
         lastSentAt: '',
         lastSentForDate: '',
         mode: 'summary',
+        minimumSeverity: 'medium',
+        dedupeMinutes: 10,
         nextSendAt: '2026-07-14T00:00:00.000Z',
         prompt: '',
         sendLockedUntil: '2026-07-14T01:05:00.000Z',
@@ -143,6 +152,7 @@ beforeEach(() => {
     mocks.getNextAiSummaryPushAt.mockReturnValue('2026-07-15T01:00:00.000Z');
     mocks.recordRealtimeAiSummaryPushFailure.mockResolvedValue(undefined);
     mocks.recordRealtimeAiSummaryPushSuccess.mockResolvedValue(undefined);
+    mocks.processEventMonitorItems.mockResolvedValue({ detectedCount: 0, sentCount: 0 });
     mocks.renewAiSummaryPushLock.mockResolvedValue(createPush());
     mocks.sendAiSummaryPush.mockResolvedValue(undefined);
     mocks.sendRealtimeItemsPush.mockResolvedValue(undefined);
@@ -162,6 +172,18 @@ describe('reader push delivery', () => {
         await sendRealtimePushes(feed, newItems);
 
         expect(mocks.sendRealtimeItemsPush).toHaveBeenCalledWith(push, feed, newItems);
+        expect(mocks.recordRealtimeAiSummaryPushSuccess).toHaveBeenCalledWith(push.id);
+    });
+
+    it('runs event monitoring only for newly persisted items', async () => {
+        const feed = createFeed();
+        const push = createPush({ mode: 'event' });
+        const newItems = [createItem('wallet-failure', 0)];
+        mocks.listEventAiSummaryPushesForFeed.mockResolvedValue([push]);
+
+        await sendEventPushes(feed, newItems);
+
+        expect(mocks.processEventMonitorItems).toHaveBeenCalledWith(push, feed, newItems);
         expect(mocks.recordRealtimeAiSummaryPushSuccess).toHaveBeenCalledWith(push.id);
     });
 
