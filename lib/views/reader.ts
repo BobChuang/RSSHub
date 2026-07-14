@@ -5,8 +5,8 @@ export const readerHtml = String.raw`<!doctype html>
         <meta name="viewport" content="width=device-width, initial-scale=1">
         <title>RSSHub Reader</title>
         <link rel="icon" href="/favicon.png">
-        <link rel="stylesheet" href="/reader/app.css?v=ai-summary-push-mode">
-        <script type="module" src="/reader/app.js?v=ai-summary-push-mode"></script>
+        <link rel="stylesheet" href="/reader/app.css?v=ai-summary-push-tasks">
+        <script type="module" src="/reader/app.js?v=ai-summary-push-tasks"></script>
     </head>
     <body>
         <main class="app-shell">
@@ -201,27 +201,77 @@ export const readerHtml = String.raw`<!doctype html>
                             </select>
                         </label>
                         <div class="ai-summary-push-panel">
-                            <div class="ai-summary-push-mode-list" aria-label="推送模式">
-                                <label class="ai-summary-push-toggle" for="aiSummaryPushEnabledInput">
-                                    <input id="aiSummaryPushEnabledInput" type="checkbox">
-                                    <span>定时推送</span>
-                                </label>
-                                <label class="ai-summary-push-toggle" for="aiSummaryRealtimePushInput">
-                                    <input id="aiSummaryRealtimePushInput" type="checkbox">
-                                    <span>实时推送</span>
-                                </label>
+                            <div class="ai-summary-push-header">
+                                <div>
+                                    <strong>推送任务</strong>
+                                    <small>可同时创建每日、每周和实时推送</small>
+                                </div>
+                                <button id="addAiSummaryPushButton" class="secondary-button compact-action-button" type="button">新增推送</button>
                             </div>
-                            <div id="aiSummaryPushSettings" class="ai-summary-push-settings" hidden>
-                                <label class="modal-field" for="aiSummaryWebhookInput">
-                                    <span>Webhook</span>
-                                    <input id="aiSummaryWebhookInput" type="url" placeholder="https://..." autocomplete="off" disabled>
-                                </label>
-                                <label id="aiSummaryPushTimeField" class="modal-field" for="aiSummaryPushTimeInput">
-                                    <span>发送时间</span>
-                                    <input id="aiSummaryPushTimeInput" type="time" value="09:00" disabled>
-                                </label>
+                            <div id="aiSummaryPushList" class="ai-summary-push-list" aria-live="polite"></div>
+                            <div id="aiSummaryPushEditor" class="ai-summary-push-editor" hidden>
+                                <div class="ai-summary-push-editor-header">
+                                    <strong id="aiSummaryPushEditorTitle">新增推送</strong>
+                                    <label class="ai-summary-push-toggle" for="aiSummaryPushEnabledInput">
+                                        <input id="aiSummaryPushEnabledInput" type="checkbox" checked>
+                                        <span>启用</span>
+                                    </label>
+                                </div>
+                                <div class="ai-summary-push-editor-grid">
+                                    <label class="modal-field" for="aiSummaryPushModeInput">
+                                        <span>推送类型</span>
+                                        <select id="aiSummaryPushModeInput">
+                                            <option value="summary">定时总结</option>
+                                            <option value="realtime">实时推送</option>
+                                        </select>
+                                    </label>
+                                    <div id="aiSummaryPushScheduleFields" class="ai-summary-push-schedule-fields">
+                                        <label class="modal-field" for="aiSummaryPushCadenceInput">
+                                            <span>发送频率</span>
+                                            <select id="aiSummaryPushCadenceInput">
+                                                <option value="daily">每天</option>
+                                                <option value="weekly">每周</option>
+                                            </select>
+                                        </label>
+                                        <label id="aiSummaryPushWeekdayField" class="modal-field" for="aiSummaryPushWeekdayInput" hidden>
+                                            <span>星期</span>
+                                            <select id="aiSummaryPushWeekdayInput">
+                                                <option value="1">周一</option>
+                                                <option value="2">周二</option>
+                                                <option value="3">周三</option>
+                                                <option value="4">周四</option>
+                                                <option value="5">周五</option>
+                                                <option value="6">周六</option>
+                                                <option value="0">周日</option>
+                                            </select>
+                                        </label>
+                                        <label class="modal-field" for="aiSummaryPushDaysInput">
+                                            <span>回看范围</span>
+                                            <select id="aiSummaryPushDaysInput">
+                                                <option value="1">最近 1 天</option>
+                                                <option value="7">最近 7 天</option>
+                                            </select>
+                                        </label>
+                                        <label class="modal-field" for="aiSummaryPushTimeInput">
+                                            <span>发送时间</span>
+                                            <input id="aiSummaryPushTimeInput" type="time" value="09:00">
+                                        </label>
+                                    </div>
+                                    <label class="modal-field ai-summary-push-webhook-field" for="aiSummaryWebhookInput">
+                                        <span>Webhook</span>
+                                        <input id="aiSummaryWebhookInput" type="url" placeholder="https://..." autocomplete="off">
+                                    </label>
+                                    <label class="modal-field ai-summary-push-prompt-field" for="aiSummaryPushPromptInput">
+                                        <span>推送提示词</span>
+                                        <textarea id="aiSummaryPushPromptInput" rows="3" spellcheck="false"></textarea>
+                                    </label>
+                                </div>
+                                <small id="aiSummaryPushTimezone" class="ai-summary-push-timezone"></small>
+                                <div class="ai-summary-push-editor-actions">
+                                    <button id="cancelAiSummaryPushButton" class="secondary-button compact-action-button" type="button">取消</button>
+                                    <button id="saveAiSummaryPushButton" class="primary-button compact-action-button" type="button">保存任务</button>
+                                </div>
                             </div>
-                            <button id="saveAiSummaryPushButton" class="secondary-button ai-summary-push-save-button" type="button">保存推送</button>
                             <p id="aiSummaryPushStatus" class="ai-summary-push-status"></p>
                         </div>
                     </div>

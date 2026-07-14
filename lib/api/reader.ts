@@ -3,21 +3,25 @@ import { Hono } from 'hono';
 import { buildAiSummaryResponse, normalizeSummaryDays, normalizeSummaryFeedIds } from './reader/ai-summary';
 import { refreshFeed } from './reader/scheduler';
 import {
-    createAiSummaryPushId,
+    createAiSummaryPush,
     createFeedId,
+    deleteAiSummaryPush,
     deleteFeed,
     deleteFeedItems,
     ensureSchema,
-    getAiSummaryPushByFeedIds,
-    getFeedsLatestItemPubDateMs,
+    getAiSummaryPush,
+    getDefaultAiSummaryPushTimezone,
     getMultiAiSummaryPrompt,
     getNextAiSummaryPushAt,
     getPool,
+    isValidAiSummaryPushTimezone,
+    listAiSummaryPushes,
+    listAiSummaryPushesByFeedIds,
     listFeeds,
     rowToItem,
+    updateAiSummaryPush,
     updateFeed,
     updateFeedItemsCategory,
-    upsertAiSummaryPush,
     upsertFeed,
     upsertItems,
 } from './reader/store';
@@ -139,6 +143,14 @@ function normalizeAiSummaryPushMode(value: unknown) {
     return value === 'realtime' ? 'realtime' : 'summary';
 }
 
+function normalizeAiSummaryPushCadence(value: unknown) {
+    return value === 'weekly' ? 'weekly' : 'daily';
+}
+
+function normalizeAiSummaryPushWeekday(value: unknown) {
+    return Number.isSafeInteger(value) && Number(value) >= 0 && Number(value) <= 6 ? Number(value) : 1;
+}
+
 function normalizeAiSummaryWebhookUrl(value: unknown) {
     const webhookUrl = String(value || '').trim();
     if (!webhookUrl) {
@@ -152,15 +164,69 @@ function normalizeAiSummaryWebhookUrl(value: unknown) {
     }
 }
 
-function normalizeAiSummaryPushNextSendAt(value: unknown, sendTime: string, enabled: boolean) {
+function normalizeAiSummaryPushTimezone(value: unknown) {
+    const timezone = String(value || '').trim();
+    return timezone || getDefaultAiSummaryPushTimezone();
+}
+
+function getAiSummaryPushValidationError(body, partial = false) {
+    if (!body || typeof body !== 'object' || Array.isArray(body)) {
+        return 'Request body must be a JSON object.';
+    }
+    if ((!partial || Object.hasOwn(body, 'feedIds')) && (!Array.isArray(body.feedIds) || !normalizeSummaryFeedIds(body.feedIds).length)) {
+        return 'feedIds must be a non-empty array of feed IDs.';
+    }
+    if (Array.isArray(body.feedIds) && body.feedIds.some((feedId) => typeof feedId !== 'string' || !feedId.trim())) {
+        return 'feedIds must contain only non-empty strings.';
+    }
+    if (Array.isArray(body.feedIds) && body.feedIds.length > 100) {
+        return 'feedIds must contain at most 100 feed IDs.';
+    }
+    if (body.mode !== undefined && body.mode !== 'summary' && body.mode !== 'realtime') {
+        return 'mode must be either "summary" or "realtime".';
+    }
+    if (body.cadence !== undefined && body.cadence !== 'daily' && body.cadence !== 'weekly') {
+        return 'cadence must be either "daily" or "weekly".';
+    }
+    if (body.weekday !== undefined && (!Number.isSafeInteger(body.weekday) || body.weekday < 0 || body.weekday > 6)) {
+        return 'weekday must be an integer from 0 (Sunday) through 6 (Saturday).';
+    }
+    if (body.days !== undefined && body.days !== 1 && body.days !== 7) {
+        return 'days must be either 1 or 7.';
+    }
+    if (body.sendTime !== undefined && (typeof body.sendTime !== 'string' || !/^(?:[01]\d|2[0-3]):[0-5]\d$/.test(body.sendTime.trim()))) {
+        return 'sendTime must use 24-hour HH:mm format.';
+    }
+    if (body.timezone !== undefined && (typeof body.timezone !== 'string' || body.timezone.trim().length > 80 || !isValidAiSummaryPushTimezone(body.timezone))) {
+        return 'timezone must be an empty string or a valid IANA timezone, such as "Asia/Shanghai".';
+    }
+    if (body.webhookUrl !== undefined) {
+        if (typeof body.webhookUrl !== 'string') {
+            return 'webhookUrl must be a string.';
+        }
+        if (body.webhookUrl.trim() && !normalizeAiSummaryWebhookUrl(body.webhookUrl)) {
+            return 'webhookUrl must be a valid HTTP or HTTPS URL.';
+        }
+    }
+    if (body.enabled !== undefined && typeof body.enabled !== 'boolean') {
+        return 'enabled must be a boolean.';
+    }
+    if (body.configRevision !== undefined && (!Number.isSafeInteger(body.configRevision) || body.configRevision < 0)) {
+        return 'configRevision must be a non-negative integer.';
+    }
+    if (body.title !== undefined && (typeof body.title !== 'string' || body.title.trim().length > 160)) {
+        return 'title must be a string no longer than 160 characters.';
+    }
+    if (body.prompt !== undefined && typeof body.prompt !== 'string') {
+        return 'prompt must be a string.';
+    }
+}
+
+function getInitialAiSummaryPushNextSendAt(sendTime: string, cadence: 'daily' | 'weekly', weekday: number, timezone: string, enabled: boolean) {
     if (!enabled) {
         return;
     }
-    const date = value ? new Date(String(value)) : undefined;
-    if (date && !Number.isNaN(date.getTime()) && date.getTime() > Date.now() - 60 * 1000) {
-        return date.toISOString();
-    }
-    return getNextAiSummaryPushAt(sendTime);
+    return getNextAiSummaryPushAt(sendTime, new Date(), cadence, weekday, timezone);
 }
 
 app.use('*', async (ctx, next) => {
@@ -369,48 +435,134 @@ app.patch('/items/:id', async (ctx) => {
     return ctx.json(result.rows[0] ? rowToItem(result.rows[0]) : null);
 });
 
+app.get('/ai-summary-pushes', async (ctx) => ctx.json({ pushes: await listAiSummaryPushes() }));
+
 app.post('/ai-summary-pushes/lookup', async (ctx) => {
     const body = await ctx.req.json();
+    if (!body || typeof body !== 'object' || !Array.isArray(body.feedIds)) {
+        return ctx.json({ error: 'feedIds must be an array of feed IDs.' }, 400);
+    }
+    if (body.feedIds.length > 100) {
+        return ctx.json({ error: 'feedIds must contain at most 100 feed IDs.' }, 400);
+    }
+    if (body.feedIds.some((feedId) => typeof feedId !== 'string' || !feedId.trim())) {
+        return ctx.json({ error: 'feedIds must contain only non-empty strings.' }, 400);
+    }
     const feedIds = normalizeSummaryFeedIds(body.feedIds);
     if (!feedIds.length) {
-        return ctx.json({ push: null });
+        return ctx.json({ pushes: [] });
     }
 
-    return ctx.json({ push: await getAiSummaryPushByFeedIds(feedIds) });
+    return ctx.json({ pushes: await listAiSummaryPushesByFeedIds(feedIds) });
 });
 
-app.put('/ai-summary-pushes', async (ctx) => {
+app.post('/ai-summary-pushes', async (ctx) => {
     const body = await ctx.req.json();
-    const feedIds = normalizeSummaryFeedIds(body.feedIds);
-    if (!feedIds.length) {
-        return ctx.json({ error: 'feedIds are required.' }, 400);
+    const validationError = getAiSummaryPushValidationError(body);
+    if (validationError) {
+        return ctx.json({ error: validationError }, 400);
     }
-
+    const feedIds = normalizeSummaryFeedIds(body.feedIds);
     const enabled = body.enabled === true;
     const mode = normalizeAiSummaryPushMode(body.mode);
+    const cadence = normalizeAiSummaryPushCadence(body.cadence);
+    if (mode === 'realtime' && cadence === 'weekly') {
+        return ctx.json({ error: 'cadence "weekly" is only available for summary pushes.' }, 400);
+    }
     const webhookUrl = normalizeAiSummaryWebhookUrl(body.webhookUrl);
     if (enabled && !webhookUrl) {
         return ctx.json({ error: 'A valid webhook URL is required to enable push.' }, 400);
     }
 
     const sendTime = normalizeAiSummaryPushSendTime(body.sendTime);
-    const latestPubDateMs = enabled && mode === 'realtime' ? await getFeedsLatestItemPubDateMs(feedIds) : 0;
-    const push = await upsertAiSummaryPush({
+    const timezone = normalizeAiSummaryPushTimezone(body.timezone);
+    const weekday = normalizeAiSummaryPushWeekday(body.weekday);
+    const push = await createAiSummaryPush({
+        cadence: mode === 'summary' ? cadence : 'daily',
         days: normalizeSummaryDays(body.days),
         enabled,
         feedIds,
-        id: createAiSummaryPushId(feedIds),
-        lastItemPubDateMs: enabled && mode === 'realtime' ? Math.max(latestPubDateMs, Date.now()) : 0,
+        lastItemPubDateMs: 0,
         mode,
-        nextSendAt: mode === 'summary' ? normalizeAiSummaryPushNextSendAt(body.nextSendAt, sendTime, enabled) : undefined,
+        nextSendAt: mode === 'summary' ? getInitialAiSummaryPushNextSendAt(sendTime, cadence, weekday, timezone, enabled) : undefined,
         prompt: typeof body.prompt === 'string' ? body.prompt : '',
         sendTime,
-        timezone: typeof body.timezone === 'string' ? body.timezone : '',
+        timezone,
         title: typeof body.title === 'string' ? body.title : '',
+        weekday,
         webhookUrl,
     });
 
+    return ctx.json(push, 201);
+});
+
+app.patch('/ai-summary-pushes/:id', async (ctx) => {
+    const body = await ctx.req.json();
+    const validationError = getAiSummaryPushValidationError(body, true);
+    if (validationError) {
+        return ctx.json({ error: validationError }, 400);
+    }
+    if (!Object.hasOwn(body, 'configRevision')) {
+        return ctx.json({ error: 'configRevision is required. Reload the push task and retry.' }, 400);
+    }
+    const current = await getAiSummaryPush(ctx.req.param('id'));
+    if (!current) {
+        return ctx.json({ error: 'AI summary push not found.' }, 404);
+    }
+
+    const feedIds = body.feedIds === undefined ? current.feedIds : normalizeSummaryFeedIds(body.feedIds);
+    const enabled = body.enabled === undefined ? current.enabled : body.enabled;
+    const mode = body.mode === undefined ? current.mode : normalizeAiSummaryPushMode(body.mode);
+    const requestedCadence = body.cadence === undefined ? current.cadence : normalizeAiSummaryPushCadence(body.cadence);
+    if (mode === 'realtime' && body.cadence === 'weekly') {
+        return ctx.json({ error: 'cadence "weekly" is only available for summary pushes.' }, 400);
+    }
+    const cadence = mode === 'realtime' ? 'daily' : requestedCadence;
+    const weekday = body.weekday === undefined ? current.weekday : normalizeAiSummaryPushWeekday(body.weekday);
+    const sendTime = body.sendTime === undefined ? current.sendTime : normalizeAiSummaryPushSendTime(body.sendTime);
+    const timezone = body.timezone === undefined ? current.timezone : normalizeAiSummaryPushTimezone(body.timezone);
+    const webhookUrl = body.webhookUrl === undefined ? current.webhookUrl : normalizeAiSummaryWebhookUrl(body.webhookUrl);
+    if (enabled && !webhookUrl) {
+        return ctx.json({ error: 'A valid webhook URL is required to enable push.' }, 400);
+    }
+
+    const scheduleChanged = !current.enabled || current.mode !== mode || current.sendTime !== sendTime || current.cadence !== cadence || current.weekday !== weekday || current.timezone !== timezone;
+    const nextSendAt = enabled && mode === 'summary' ? (scheduleChanged || !current.nextSendAt ? getInitialAiSummaryPushNextSendAt(sendTime, cadence, weekday, timezone, true) : current.nextSendAt) : undefined;
+    const resetRealtimeCursor = enabled && mode === 'realtime' && (!current.enabled || current.mode !== 'realtime' || Object.hasOwn(body, 'feedIds'));
+    const push = await updateAiSummaryPush(
+        current.id,
+        {
+            cadence,
+            days: body.days === undefined ? current.days : normalizeSummaryDays(body.days),
+            enabled,
+            feedIds,
+            lastItemPubDateMs: mode === 'realtime' && !resetRealtimeCursor ? current.lastItemPubDateMs : 0,
+            mode,
+            nextSendAt,
+            prompt: body.prompt === undefined ? current.prompt : body.prompt,
+            sendTime,
+            timezone,
+            title: body.title === undefined ? current.title : body.title,
+            weekday,
+            webhookUrl,
+        },
+        body.configRevision
+    );
+    if (!push) {
+        if (await getAiSummaryPush(current.id)) {
+            return ctx.json({ error: 'AI summary push was modified or is currently being sent. Reload it and retry.' }, 409);
+        }
+        return ctx.json({ error: 'AI summary push not found.' }, 404);
+    }
     return ctx.json(push);
+});
+
+app.delete('/ai-summary-pushes/:id', async (ctx) => {
+    const deleted = await deleteAiSummaryPush(ctx.req.param('id'));
+    if (!deleted) {
+        return ctx.json({ error: 'AI summary push not found.' }, 404);
+    }
+    return ctx.json({ ok: true });
 });
 
 app.get('/ai-summary-prompt', async (ctx) => ctx.json({ prompt: await getMultiAiSummaryPrompt() }));

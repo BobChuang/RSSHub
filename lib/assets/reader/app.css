@@ -1226,7 +1226,7 @@ a.reader-action {
 }
 
 .ai-summary-config:has(.ai-summary-channel-field:not([hidden])) {
-    grid-template-columns: minmax(180px, 250px) minmax(0, 1fr);
+    grid-template-columns: minmax(400px, 1fr) minmax(0, 1fr);
 }
 
 .ai-summary-config > .modal-field,
@@ -1256,13 +1256,34 @@ a.reader-action {
     display: grid;
     gap: 10px;
     border-top: 1px solid var(--line);
-    padding-top: 2px;
+    padding-top: 12px;
 }
 
-.ai-summary-push-mode-list {
+.ai-summary-push-header,
+.ai-summary-push-editor-header,
+.ai-summary-push-item-header {
     display: flex;
-    flex-wrap: wrap;
-    gap: 10px 16px;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+}
+
+.ai-summary-push-header > div {
+    display: grid;
+    gap: 3px;
+}
+
+.ai-summary-push-header strong,
+.ai-summary-push-editor-header strong {
+    color: var(--ink);
+    font-size: 13px;
+}
+
+.ai-summary-push-header small,
+.ai-summary-push-timezone {
+    color: var(--muted);
+    font-size: 11px;
+    line-height: 1.45;
 }
 
 .ai-summary-push-toggle {
@@ -1281,29 +1302,132 @@ a.reader-action {
     padding: 0;
 }
 
-.ai-summary-push-settings {
+.ai-summary-push-list {
     display: grid;
-    grid-template-columns: minmax(280px, 1fr) 150px;
+    max-height: 270px;
+    overflow: auto;
+    gap: 8px;
+}
+
+.ai-summary-push-empty {
+    margin: 0;
+    border: 1px dashed var(--line);
+    border-radius: 8px;
+    padding: 12px;
+    color: var(--muted);
+    font-size: 12px;
+    text-align: center;
+}
+
+.ai-summary-push-item {
+    display: grid;
+    gap: 7px;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    background: rgb(0 0 0 / 0.12);
+    padding: 10px;
+}
+
+.ai-summary-push-item-header strong {
+    min-width: 0;
+    overflow: hidden;
+    color: var(--ink);
+    font-size: 12px;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.ai-summary-push-badge {
+    flex: 0 0 auto;
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    padding: 2px 7px;
+    color: var(--muted);
+    font-size: 10px;
+    font-weight: 850;
+    white-space: nowrap;
+}
+
+.ai-summary-push-badge.enabled {
+    border-color: rgb(80 190 130 / 0.45);
+    background: rgb(80 190 130 / 0.1);
+    color: #8bdbad;
+}
+
+.ai-summary-push-item-details,
+.ai-summary-push-item-status,
+.ai-summary-push-item-error {
+    overflow: hidden;
+    margin: 0;
+    color: var(--muted);
+    font-size: 11px;
+    line-height: 1.4;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.ai-summary-push-item-error {
+    color: #ff9c73;
+}
+
+.ai-summary-push-item-actions,
+.ai-summary-push-editor-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+}
+
+.ai-summary-push-item-actions .compact-action-button {
+    min-height: 28px;
+}
+
+.ai-summary-push-delete-button {
+    color: #ff9c73;
+}
+
+.ai-summary-push-editor {
+    display: grid;
+    gap: 10px;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    background: rgb(0 0 0 / 0.14);
+    padding: 12px;
+}
+
+.ai-summary-push-editor[hidden],
+.ai-summary-push-schedule-fields[hidden],
+.ai-summary-push-schedule-fields .modal-field[hidden] {
+    display: none;
+}
+
+.ai-summary-push-editor-grid,
+.ai-summary-push-schedule-fields {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
     align-items: end;
     gap: 10px;
 }
 
-.ai-summary-primary-config .ai-summary-push-settings {
-    grid-template-columns: 1fr;
+.ai-summary-push-schedule-fields,
+.ai-summary-push-webhook-field,
+.ai-summary-push-prompt-field {
+    grid-column: 1 / -1;
 }
 
-.ai-summary-push-settings[hidden] {
-    display: none;
+.ai-summary-push-prompt-field textarea {
+    min-height: 82px;
+    resize: vertical;
+    color: var(--ink);
+    font:
+        12px/1.45 ui-monospace,
+        SFMono-Regular,
+        Menlo,
+        Consolas,
+        monospace;
 }
 
-#aiSummaryPushTimeField[hidden] {
-    display: none;
-}
-
-.ai-summary-push-save-button {
-    justify-self: start;
-    min-height: 40px;
-    white-space: nowrap;
+.ai-summary-push-editor-actions {
+    justify-content: flex-end;
 }
 
 .ai-summary-push-status {
@@ -1641,7 +1765,8 @@ a.reader-action {
         min-height: 180px;
     }
 
-    .ai-summary-push-settings {
+    .ai-summary-push-editor-grid,
+    .ai-summary-push-schedule-fields {
         grid-template-columns: 1fr;
     }
 

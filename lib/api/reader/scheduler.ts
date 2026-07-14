@@ -11,6 +11,7 @@ import {
     ensureSchema,
     failAiSummaryPush,
     getFeed,
+    getFollowingAiSummaryPushAt,
     getNextAiSummaryPushAt,
     hasReaderDatabase,
     listRealtimeAiSummaryPushesForFeed,
@@ -18,6 +19,7 @@ import {
     recordFetchRun,
     recordRealtimeAiSummaryPushFailure,
     recordRealtimeAiSummaryPushSuccess,
+    renewAiSummaryPushLock,
     updateFeedFetchState,
     upsertFeed,
 } from './store';
@@ -46,15 +48,36 @@ function getLockSeconds() {
     return Math.max(Math.ceil(getFetchTimeoutMs() / 1000) + config.reader.schedulerInterval, 30);
 }
 
-function getNextPushSendAt(push: ReaderAiSummaryPush) {
-    const next = push.nextSendAt ? new Date(push.nextSendAt) : new Date(getNextAiSummaryPushAt(push.sendTime));
-    if (Number.isNaN(next.getTime())) {
-        return getNextAiSummaryPushAt(push.sendTime);
+function getAiSummaryPushLockSeconds() {
+    return Math.max(getLockSeconds(), 300);
+}
+
+export function getNextPushSendAt(push: ReaderAiSummaryPush, after: Date | string = new Date()) {
+    const anchor = after instanceof Date ? after : new Date(after);
+    const from = Number.isNaN(anchor.getTime()) ? new Date() : anchor;
+    const getNextAt = (scheduledAt: Date | string) => getNextAiSummaryPushAt(push.sendTime, scheduledAt, push.cadence || 'daily', push.weekday, push.timezone);
+    const scheduledAt = new Date(push.nextSendAt);
+    if (Number.isNaN(scheduledAt.getTime()) || scheduledAt.getTime() > from.getTime()) {
+        return getNextAt(from);
     }
-    do {
-        next.setDate(next.getDate() + 1);
-    } while (next.getTime() <= Date.now());
-    return next.toISOString();
+
+    const getFollowingAt = (periodCount: number) => getFollowingAiSummaryPushAt(push.sendTime, scheduledAt, push.cadence || 'daily', push.timezone, periodCount);
+    const isDue = (nextSendAt: string) => new Date(nextSendAt).getTime() <= from.getTime();
+    let lastDuePeriod = 0;
+    let nextPeriod = 1;
+    while (isDue(getFollowingAt(nextPeriod))) {
+        lastDuePeriod = nextPeriod;
+        nextPeriod *= 2;
+    }
+    while (nextPeriod - lastDuePeriod > 1) {
+        const candidatePeriod = Math.floor((lastDuePeriod + nextPeriod) / 2);
+        if (isDue(getFollowingAt(candidatePeriod))) {
+            lastDuePeriod = candidatePeriod;
+        } else {
+            nextPeriod = candidatePeriod;
+        }
+    }
+    return getFollowingAt(nextPeriod);
 }
 
 async function fetchFeedData(feed: ReaderFeed) {
@@ -84,19 +107,15 @@ async function fetchFeedData(feed: ReaderFeed) {
     }
 }
 
-async function sendRealtimePushes(feed: ReaderFeed, newItems: ReaderItem[]) {
+export async function sendRealtimePushes(feed: ReaderFeed, newItems: ReaderItem[]) {
     if (!newItems.length) {
         return;
     }
     const pushes = await listRealtimeAiSummaryPushesForFeed(feed.id);
     await Promise.all(
         pushes.map(async (push) => {
-            const items = newItems.filter((item) => !push.lastItemPubDateMs || item.pubDateMs > push.lastItemPubDateMs);
-            if (!items.length) {
-                return;
-            }
             try {
-                await sendRealtimeItemsPush(push, feed, items);
+                await sendRealtimeItemsPush(push, feed, newItems);
                 await recordRealtimeAiSummaryPushSuccess(push.id);
             } catch (error) {
                 const message = error instanceof Error ? error.message : 'Unable to send realtime push.';
@@ -157,14 +176,63 @@ export async function refreshFeed(feedOrId: ReaderFeed | string) {
     }
 }
 
-async function sendDueAiSummaryPush(push: ReaderAiSummaryPush) {
+function startAiSummaryPushLockHeartbeat(push: ReaderAiSummaryPush, lockSeconds: number) {
+    let leaseLost = false;
+    let renewalPromise: Promise<void> | null = null;
+    let stopped = false;
+    const runRenewal = async () => {
+        try {
+            const renewed = await renewAiSummaryPushLock(push.id, push.sendLockToken, lockSeconds);
+            if (!renewed) {
+                leaseLost = true;
+                logger.warn(`Reader AI summary push lease lost while sending ${push.title || push.id}.`);
+            }
+        } catch (error) {
+            logger.warn(`Reader AI summary push lease renewal failed for ${push.title || push.id}: ${error instanceof Error ? error.message : error}`);
+        }
+        renewalPromise = null;
+    };
+    const renew = () => {
+        if (stopped || leaseLost || renewalPromise) {
+            return;
+        }
+        renewalPromise = runRenewal();
+    };
+    const interval = setInterval(renew, Math.max(Math.floor((lockSeconds * 1000) / 3), 1000));
+    interval.unref?.();
+
+    return async () => {
+        if (!stopped) {
+            stopped = true;
+            clearInterval(interval);
+        }
+        await renewalPromise;
+        return leaseLost;
+    };
+}
+
+export async function sendDueAiSummaryPush(push: ReaderAiSummaryPush) {
+    if (!push.sendLockToken) {
+        logger.warn(`Reader AI summary push ${push.title || push.id} was claimed without a send lock token.`);
+        return;
+    }
     const nextSendAt = getNextPushSendAt(push);
+    const lockSeconds = getAiSummaryPushLockSeconds();
+    const stopHeartbeat = startAiSummaryPushLockHeartbeat(push, lockSeconds);
     try {
         await sendAiSummaryPush(push);
-        await completeAiSummaryPush(push.id, nextSendAt);
+        await stopHeartbeat();
+        const completed = await completeAiSummaryPush(push.id, push.sendLockToken, nextSendAt);
+        if (!completed) {
+            logger.warn(`Reader AI summary push lease was lost before completing ${push.title || push.id}.`);
+        }
     } catch (error) {
+        await stopHeartbeat();
         const message = error instanceof Error ? error.message : 'Unable to send AI summary push.';
-        await failAiSummaryPush(push.id, message, nextSendAt);
+        const failed = await failAiSummaryPush(push.id, push.sendLockToken, message, nextSendAt);
+        if (!failed) {
+            logger.warn(`Reader AI summary push lease was lost before recording failure for ${push.title || push.id}.`);
+        }
         logger.warn(`Reader AI summary push failed for ${push.title || push.id}: ${message}`);
     }
 }
@@ -176,7 +244,7 @@ async function tick() {
     schedulerRunning = true;
     try {
         await ensureSchema();
-        const [feeds, pushes] = await Promise.all([claimDueFeeds(config.reader.schedulerBatchSize, getLockSeconds()), claimDueAiSummaryPushes(config.reader.schedulerBatchSize, getLockSeconds())]);
+        const [feeds, pushes] = await Promise.all([claimDueFeeds(config.reader.schedulerBatchSize, getLockSeconds()), claimDueAiSummaryPushes(config.reader.schedulerBatchSize, getAiSummaryPushLockSeconds())]);
         await Promise.all([
             ...feeds.map(async (feed) => {
                 try {
