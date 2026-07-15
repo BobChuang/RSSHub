@@ -107,7 +107,7 @@ if (config.isPackage) {
         default:
             modules = (await directoryImport({
                 targetDirectoryPath: path.join(__dirname, './routes'),
-                importPattern: /\.tsx?$/,
+                importPattern: /(?<!\.test)\.tsx?$/,
             })) as typeof modules;
     }
 }
