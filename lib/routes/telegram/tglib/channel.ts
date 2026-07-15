@@ -56,6 +56,10 @@ export function getMessageMediaUrl(requestUrl: string, username: string, message
     return url.href;
 }
 
+export function getTelegramSenderRole(sender: unknown) {
+    return sender instanceof Api.User && sender.bot === true ? 'bot' : 'user';
+}
+
 export function getMediaLink(src: string, m: Api.TypeMessageMedia) {
     const doc = getDocument(m);
     const mime = doc ? doc.mimeType : '';
@@ -204,6 +208,7 @@ export async function getTelegramChannel(ctx: Context, username: string, options
                 pubDate: new Date(message.date * 1000).toUTCString(),
                 link: `https://t.me/s/${username}/${message.id}`,
                 author: getDisplayName(message.sender ?? entity),
+                category: [`telegram-role:${getTelegramSenderRole(message.sender)}`],
             });
         }
     }

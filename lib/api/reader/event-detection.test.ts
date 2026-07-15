@@ -238,4 +238,18 @@ describe('reader event detection', () => {
         expect(mocks.createOrUpdateReaderEvent).not.toHaveBeenCalled();
         expect(mocks.postPushWebhook).not.toHaveBeenCalled();
     });
+
+    it.each(['discord-role:bot', 'telegram-role:bot'])('filters messages with the explicit %s sender marker before AI detection', async (senderCategory) => {
+        const fetchMock = vi.fn();
+        vi.stubGlobal('fetch', fetchMock);
+        const item = createItem();
+        item.categories = [senderCategory];
+
+        const result = await processEventMonitorItems(createPush(), createFeed(), [item]);
+
+        expect(result).toEqual({ detectedCount: 0, sentCount: 0 });
+        expect(fetchMock).not.toHaveBeenCalled();
+        expect(mocks.createOrUpdateReaderEvent).not.toHaveBeenCalled();
+        expect(mocks.postPushWebhook).not.toHaveBeenCalled();
+    });
 });

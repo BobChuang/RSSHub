@@ -84,7 +84,7 @@ async function handler(ctx) {
         author: message.author.global_name ?? message.author.username,
         pubDate: parseDate(message.timestamp),
         updated: message.edited_timestamp ? parseDate(message.edited_timestamp) : undefined,
-        category: [`#${message.channel_id}`],
+        category: [`#${message.channel_id}`, `discord-role:${message.author.bot === true || Boolean(message.webhook_id) ? 'bot' : 'user'}`],
         link: `${baseUrl}/channels/${guildId}/${message.channel_id}/${message.id}`,
     }));
 

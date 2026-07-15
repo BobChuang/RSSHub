@@ -60,8 +60,8 @@ const getAuthorRoleMap = async (guildId: string, authorization: string, authorId
     return new Map(entries);
 };
 
-const getMessageRole = (message, adminRoleIds: Set<string>, authorRoleMap: Map<string, string[]>) => {
-    if (message.author.bot) {
+export const getMessageRole = (message, adminRoleIds: Set<string>, authorRoleMap: Map<string, string[]>) => {
+    if (message.author.bot === true || Boolean(message.webhook_id)) {
         return 'bot';
     }
     const authorRoles = authorRoleMap.get(message.author.id) || [];

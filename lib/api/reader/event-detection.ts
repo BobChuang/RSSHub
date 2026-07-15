@@ -5,6 +5,7 @@ import { createOrUpdateReaderEvent, markReaderEventNotified, normalizeReaderEven
 
 const eventBatchSize = 25;
 const minimumEventConfidence = 0.7;
+const botSenderCategories = new Set(['discord-role:bot', 'telegram-role:bot']);
 
 export const defaultEventMonitorPrompt = [
     '识别需要产品、运营或研发团队关注的真实产品事件。',
@@ -37,6 +38,16 @@ function getBatches<T>(items: T[], size: number) {
         batches.push(items.slice(index, index + size));
     }
     return batches;
+}
+
+export function isBotAuthoredItem(item: Pick<ReaderItem, 'categories'>) {
+    return item.categories.some((category) =>
+        botSenderCategories.has(
+            String(category || '')
+                .trim()
+                .toLowerCase()
+        )
+    );
 }
 
 function getAiRequestUrl() {
@@ -170,7 +181,10 @@ async function requestEventDetectionBatch(push: EventDetectionConfig, items: Rea
 }
 
 export async function detectProductEvents(push: EventDetectionConfig, items: ReaderItem[]) {
-    const batches = getBatches(items, eventBatchSize);
+    const batches = getBatches(
+        items.filter((item) => !isBotAuthoredItem(item)),
+        eventBatchSize
+    );
     const results = await Promise.all(batches.map((batch) => requestEventDetectionBatch(push, batch)));
     return results.flat();
 }
