@@ -680,7 +680,7 @@ app.get('/ai-summary-prompt', async (ctx) => ctx.json({ prompt: await getMultiAi
 app.post('/feeds/:feedId/ai-summary', async (ctx) => {
     const body = await ctx.req.json();
     const days = normalizeSummaryDays(body.days);
-    const result = await buildAiSummaryResponse([ctx.req.param('feedId')], days, body.prompt, body.savePrompt === true);
+    const result = await buildAiSummaryResponse([ctx.req.param('feedId')], days, body.prompt, body.savePrompt === true, { forceRefresh: body.forceRefresh === true });
 
     return ctx.json(result);
 });
@@ -689,7 +689,7 @@ app.post('/feeds/ai-summary', async (ctx) => {
     const body = await ctx.req.json();
     const days = normalizeSummaryDays(body.days);
     const feedIds = normalizeSummaryFeedIds(body.feedIds);
-    const result = await buildAiSummaryResponse(feedIds, days, body.prompt, body.savePrompt === true);
+    const result = await buildAiSummaryResponse(feedIds, days, body.prompt, body.savePrompt === true, { forceRefresh: body.forceRefresh === true });
 
     return ctx.json(result);
 });

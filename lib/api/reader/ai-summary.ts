@@ -1,5 +1,7 @@
 import MarkdownIt from 'markdown-it';
 
+import logger from '@/utils/logger';
+
 import type { ReaderAiSummaryPush, ReaderFeed, ReaderItem } from './store';
 import { getFeedsAiSummaryPrompt, getMultiAiSummaryPrompt, getPool, rowToItem, updateFeedsAiSummaryPrompt, updateMultiAiSummaryPrompt } from './store';
 
@@ -14,6 +16,7 @@ const summaryItemContentLimit = 240;
 const summaryCacheTtlMs = 5 * 60 * 1000;
 const defaultAiMaxTokens = 3000;
 const defaultAiTimeoutMs = 180000;
+const summaryCacheVersion = 2;
 const linkPreservationInstruction = [
     '链接保留要求：',
     '1. 每条具体内容如果引用原始文章，链接行必须紧跟对应内容下方，格式为：链接：<原始URL>。',
@@ -33,12 +36,22 @@ type AiSummaryResult = {
     prompt: string;
 };
 
-type CachedAiSummary = {
+type AiSummaryCacheEntry = {
+    createdAt: number;
     expiresAt: number;
+    itemCount: number;
     result: AiSummaryResult;
+    summarizedItemCount: number;
 };
 
-const aiSummaryCache = new Map<string, CachedAiSummary>();
+type AiSummaryBuildOptions = {
+    forceRefresh?: boolean;
+};
+
+type AiSummaryCacheSource = 'cache' | 'fresh' | 'in-flight';
+
+const aiSummaryCache = new Map<string, AiSummaryCacheEntry>();
+const aiSummaryInFlight = new Map<string, Promise<AiSummaryCacheEntry>>();
 
 export const defaultAiSummaryPrompt = [
     '请用中文总结这个 RSS 订阅源最近 {{days}} 天的内容。',
@@ -212,9 +225,8 @@ function selectSummaryItems(items: SummaryInputItem[], feedIds: string[]) {
     return selectedItems.toSorted((left, right) => right.pubDateMs - left.pubDateMs || right.id.localeCompare(left.id));
 }
 
-function createSummaryCacheKey(feedIds: string[], days: number, promptTemplate: string, items: SummaryInputItem[], totalItemCount: number) {
-    const itemSignature = items.map((item) => `${item.id}:${item.pubDateMs}`).join('|');
-    return JSON.stringify({ days, feedIds: [...feedIds].toSorted((left, right) => left.localeCompare(right)), itemSignature, promptTemplate, totalItemCount });
+function createSummaryCacheKey(feedIds: string[], days: number, promptTemplate: string) {
+    return JSON.stringify({ days, feedIds: [...feedIds].toSorted((left, right) => left.localeCompare(right)), promptTemplate, version: summaryCacheVersion });
 }
 
 function getCachedAiSummary(cacheKey: string) {
@@ -226,20 +238,18 @@ function getCachedAiSummary(cacheKey: string) {
         aiSummaryCache.delete(cacheKey);
         return;
     }
-    return cached.result;
+    return cached;
 }
 
-function cacheAiSummary(cacheKey: string, result: AiSummaryResult) {
-    if (result.configured && result.summary) {
-        aiSummaryCache.set(cacheKey, {
-            expiresAt: Date.now() + summaryCacheTtlMs,
-            result,
-        });
+function cacheAiSummary(cacheKey: string, entry: AiSummaryCacheEntry) {
+    if (entry.result.configured && entry.result.summary) {
+        aiSummaryCache.set(cacheKey, entry);
     }
 }
 
 export function clearAiSummaryCache() {
     aiSummaryCache.clear();
+    aiSummaryInFlight.clear();
 }
 
 async function requestAiSummaryForItems(promptTemplate: string, items: SummaryInputItem[], days: number, totalItemCount = items.length) {
@@ -250,42 +260,78 @@ async function requestAiSummaryForItems(promptTemplate: string, items: SummaryIn
     };
 }
 
-export async function buildAiSummaryResponse(feedIds: string[], days: number, promptValue?: unknown, savePrompt?: boolean) {
+async function generateAiSummaryCacheEntry(feedIds: string[], days: number, promptTemplate: string): Promise<AiSummaryCacheEntry> {
+    const items = await getSummaryItems(feedIds, days);
+    const summaryItems = selectSummaryItems(items, feedIds);
+    const aiResult = summaryItems.length
+        ? await requestAiSummaryForItems(promptTemplate, summaryItems, days, items.length)
+        : {
+              configured: Boolean((process.env.READER_AI_API_KEY || process.env.OPENAI_API_KEY) && process.env.READER_AI_MODEL),
+              message: '',
+              prompt: renderSummaryPrompt(promptTemplate, summaryItems, days, items.length),
+              summary: '',
+          };
+    const createdAt = Date.now();
+    return {
+        createdAt,
+        expiresAt: createdAt + summaryCacheTtlMs,
+        itemCount: items.length,
+        result: aiResult,
+        summarizedItemCount: summaryItems.length,
+    };
+}
+
+function formatAiSummaryResponse(entry: AiSummaryCacheEntry, days: number, promptTemplate: string, cacheSource: AiSummaryCacheSource) {
+    return {
+        ...entry.result,
+        cacheAgeMs: Math.max(0, Date.now() - entry.createdAt),
+        cacheSource,
+        days,
+        itemCount: entry.itemCount,
+        summarizedItemCount: entry.summarizedItemCount,
+        prompt: entry.result.prompt,
+        promptTemplate,
+        summaryHtml: renderSummaryMarkdown(entry.result.summary),
+    };
+}
+
+export async function buildAiSummaryResponse(feedIds: string[], days: number, promptValue?: unknown, savePrompt?: boolean, options: AiSummaryBuildOptions = {}) {
     const submittedPrompt = normalizeSummaryPrompt(promptValue);
     const isSingleFeed = feedIds.length === 1;
     const defaultPrompt = isSingleFeed ? defaultAiSummaryPrompt : defaultMultiAiSummaryPrompt;
-    const savedPrompt = isSingleFeed ? await getFeedsAiSummaryPrompt(feedIds) : await getMultiAiSummaryPrompt();
+    const savedPrompt = submittedPrompt ? '' : isSingleFeed ? await getFeedsAiSummaryPrompt(feedIds) : await getMultiAiSummaryPrompt();
     const promptTemplate = submittedPrompt || savedPrompt || defaultPrompt;
     if (savePrompt && submittedPrompt) {
         await (isSingleFeed ? updateFeedsAiSummaryPrompt(feedIds, promptTemplate) : updateMultiAiSummaryPrompt(promptTemplate));
     }
-    const items = await getSummaryItems(feedIds, days);
-    const summaryItems = selectSummaryItems(items, feedIds);
-    const cacheKey = createSummaryCacheKey(feedIds, days, promptTemplate, summaryItems, items.length);
-    const cachedAiResult = summaryItems.length ? getCachedAiSummary(cacheKey) : undefined;
-    const aiResult =
-        cachedAiResult ||
-        (summaryItems.length
-            ? await requestAiSummaryForItems(promptTemplate, summaryItems, days, items.length)
-            : {
-                  configured: Boolean((process.env.READER_AI_API_KEY || process.env.OPENAI_API_KEY) && process.env.READER_AI_MODEL),
-                  message: '',
-                  prompt: renderSummaryPrompt(promptTemplate, summaryItems, days, items.length),
-                  summary: '',
-              });
-    if (!cachedAiResult && summaryItems.length) {
-        cacheAiSummary(cacheKey, aiResult);
+    const cacheKey = createSummaryCacheKey(feedIds, days, promptTemplate);
+    const forceRefresh = options.forceRefresh === true;
+    if (!forceRefresh) {
+        const cachedAiSummary = getCachedAiSummary(cacheKey);
+        if (cachedAiSummary) {
+            logger.info(`Reader AI summary cache hit: feedCount=${feedIds.length} days=${days}`);
+            return formatAiSummaryResponse(cachedAiSummary, days, promptTemplate, 'cache');
+        }
     }
 
-    return {
-        ...aiResult,
-        days,
-        itemCount: items.length,
-        summarizedItemCount: summaryItems.length,
-        prompt: aiResult.prompt,
-        promptTemplate,
-        summaryHtml: renderSummaryMarkdown(aiResult.summary),
-    };
+    const existingRequest = aiSummaryInFlight.get(cacheKey);
+    if (existingRequest) {
+        logger.info(`Reader AI summary joined in-flight request: feedCount=${feedIds.length} days=${days}`);
+        return formatAiSummaryResponse(await existingRequest, days, promptTemplate, 'in-flight');
+    }
+
+    logger.info(`Reader AI summary cache miss: feedCount=${feedIds.length} days=${days} forceRefresh=${forceRefresh}`);
+    const generationRequest = generateAiSummaryCacheEntry(feedIds, days, promptTemplate);
+    aiSummaryInFlight.set(cacheKey, generationRequest);
+    try {
+        const entry = await generationRequest;
+        cacheAiSummary(cacheKey, entry);
+        return formatAiSummaryResponse(entry, days, promptTemplate, 'fresh');
+    } finally {
+        if (aiSummaryInFlight.get(cacheKey) === generationRequest) {
+            aiSummaryInFlight.delete(cacheKey);
+        }
+    }
 }
 
 function getAiRequestUrl() {
@@ -580,7 +626,7 @@ function getRealtimeWebhookMessage(push: ReaderAiSummaryPush, feed: ReaderFeed, 
 }
 
 export async function sendAiSummaryPush(push: ReaderAiSummaryPush) {
-    const result = await buildAiSummaryResponse(push.feedIds, push.days, push.prompt || undefined, false);
+    const result = await buildAiSummaryResponse(push.feedIds, push.days, push.prompt || undefined, false, { forceRefresh: true });
     if (!result.configured) {
         throw new Error(result.message || 'AI summary is not configured.');
     }

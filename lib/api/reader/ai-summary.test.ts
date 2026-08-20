@@ -175,16 +175,34 @@ describe('reader ai summary', () => {
 
     it('reuses a recent summary for the same input', async () => {
         const fetchMock = mockAiFetch();
-        mocks.getPoolQuery.mockResolvedValue({
+        mocks.getPoolQuery.mockResolvedValueOnce({
             rows: mockItems(100),
+        });
+        mocks.getPoolQuery.mockResolvedValueOnce({
+            rows: mockItems(101),
         });
 
         const firstResult = await buildAiSummaryResponse(['feed-a'], 7);
         const secondResult = await buildAiSummaryResponse(['feed-a'], 7);
 
         expect(fetchMock).toHaveBeenCalledTimes(1);
+        expect(mocks.getPoolQuery).toHaveBeenCalledTimes(1);
         expect(secondResult.summary).toBe(firstResult.summary);
         expect(secondResult.prompt).toBe(firstResult.prompt);
+        expect(secondResult.cacheSource).toBe('cache');
+    });
+
+    it('bypasses the cache for a forced refresh', async () => {
+        const fetchMock = mockAiFetch();
+        mocks.getPoolQuery.mockResolvedValue({
+            rows: mockItems(100),
+        });
+
+        await buildAiSummaryResponse(['feed-a'], 7);
+        const result = await buildAiSummaryResponse(['feed-a'], 7, undefined, false, { forceRefresh: true });
+
+        expect(fetchMock).toHaveBeenCalledTimes(2);
+        expect(result.cacheSource).toBe('fresh');
     });
 
     it('samples multiple feeds in a round-robin order', async () => {
