@@ -21,17 +21,20 @@ function restoreEnv(key: string, value: string | undefined) {
     process.env[key] = value;
 }
 
-function mockItems(length: number) {
+function mockItems(length: number, feedId = 'feed-a', offset = 0, feedTitle = '') {
     return Array.from({ length }, (_, index) => ({
         description: `Description ${index + 1}`,
-        id: `item-${index + 1}`,
+        feedId,
+        feed_title: feedTitle,
+        id: `item-${index + offset + 1}`,
         link: `https://example.com/items/${index + 1}`,
+        pubDateMs: length - index,
         title: `Title ${index + 1}`,
     }));
 }
 
 function mockAiFetch(
-    getSummary = (prompt: string) =>
+    getSummary: (prompt: string) => string = (prompt: string) =>
         prompt.includes('第 1/2 批') ? 'batch 1 summary\n链接：https://example.com/items/1' : prompt.includes('第 2/2 批') ? 'batch 2 summary\n链接：https://example.com/items/1001' : 'final summary\n链接：https://example.com/items/1'
 ) {
     process.env.READER_AI_API_KEY = 'test-key';
@@ -71,11 +74,12 @@ vi.mock('./store', () => ({
     updateMultiAiSummaryPrompt: mocks.updateMultiAiSummaryPrompt,
 }));
 
-const { buildAiSummaryResponse, defaultMultiAiSummaryPrompt } = await import('./ai-summary');
+const { buildAiSummaryResponse, clearAiSummaryCache, defaultMultiAiSummaryPrompt } = await import('./ai-summary');
 
 describe('reader ai summary', () => {
     beforeEach(() => {
         vi.clearAllMocks();
+        clearAiSummaryCache();
         mocks.getFeedsAiSummaryPrompt.mockResolvedValue('saved single-feed prompt');
         mocks.getMultiAiSummaryPrompt.mockResolvedValue('saved multi-feed prompt');
         mocks.getPoolQuery.mockResolvedValue({ rows: [] });
@@ -83,6 +87,7 @@ describe('reader ai summary', () => {
     });
 
     afterEach(() => {
+        clearAiSummaryCache();
         restoreEnv('READER_AI_API_KEY', originalReaderAiApiKey);
         restoreEnv('READER_AI_MODEL', originalReaderAiModel);
         restoreEnv('READER_AI_REQUEST_URL', originalReaderAiRequestUrl);
@@ -152,7 +157,7 @@ describe('reader ai summary', () => {
         expect(result.summary).not.toContain('链接:\n');
     });
 
-    it('requests one summary when fetched item count is at the batch limit', async () => {
+    it('limits oversized summaries while preserving the fetched item count', async () => {
         const fetchMock = mockAiFetch();
         mocks.getPoolQuery.mockResolvedValue({
             rows: mockItems(1000),
@@ -162,29 +167,41 @@ describe('reader ai summary', () => {
 
         expect(fetchMock).toHaveBeenCalledTimes(1);
         expect(result.itemCount).toBe(1000);
+        expect(result.summarizedItemCount).toBe(500);
         expect(result.summary).toContain('链接：https://example.com/items/1');
-        expect(result.prompt).toContain('1000. Title 1000');
+        expect(result.prompt).not.toContain('Title 1000');
+        expect(result.prompt).toContain('原始范围共有 1000 条内容');
     });
 
-    it('summarizes in batches when fetched item count exceeds the batch limit', async () => {
+    it('reuses a recent summary for the same input', async () => {
         const fetchMock = mockAiFetch();
         mocks.getPoolQuery.mockResolvedValue({
-            rows: mockItems(1001),
+            rows: mockItems(100),
         });
 
-        const result = await buildAiSummaryResponse(['feed-a'], 7);
+        const firstResult = await buildAiSummaryResponse(['feed-a'], 7);
+        const secondResult = await buildAiSummaryResponse(['feed-a'], 7);
 
-        expect(fetchMock).toHaveBeenCalledTimes(3);
-        expect(result.itemCount).toBe(1001);
-        expect(result.summary).toContain('链接：https://example.com/items/1');
-        expect(result.prompt).toContain('batch 1 summary');
-        expect(result.prompt).toContain('链接：https://example.com/items/1');
-        expect(result.prompt).toContain('batch 2 summary');
-        expect(result.prompt).toContain('链接：https://example.com/items/1001');
-        expect(result.prompt).toContain('链接行必须紧跟对应内容下方');
+        expect(fetchMock).toHaveBeenCalledTimes(1);
+        expect(secondResult.summary).toBe(firstResult.summary);
+        expect(secondResult.prompt).toBe(firstResult.prompt);
     });
 
-    it('removes empty link lines from batched summaries before sending them to the final summary', async () => {
+    it('samples multiple feeds in a round-robin order', async () => {
+        const fetchMock = mockAiFetch((prompt) => prompt);
+        mocks.getPoolQuery.mockResolvedValue({
+            rows: [...mockItems(400, 'feed-a', 0, 'Feed A'), ...mockItems(400, 'feed-b', 400, 'Feed B')],
+        });
+
+        const result = await buildAiSummaryResponse(['feed-a', 'feed-b'], 7);
+        const requestBody = JSON.parse(String(fetchMock.mock.calls[0][1].body));
+
+        expect(result.summarizedItemCount).toBe(500);
+        expect(requestBody.messages[1].content).toContain('Source: Feed A');
+        expect(requestBody.messages[1].content).toContain('Source: Feed B');
+    });
+
+    it('removes empty link lines from the summary result', async () => {
         mockAiFetch((prompt) => {
             if (prompt.includes('第 1/2 批')) {
                 return ['batch 1 summary', '链接:', 'keep', '链接：https://example.com/items/1'].join('\n');
@@ -195,7 +212,7 @@ describe('reader ai summary', () => {
             return ['final summary', '链接:', 'keep', '链接：https://example.com/items/1'].join('\n');
         });
         mocks.getPoolQuery.mockResolvedValue({
-            rows: mockItems(1001),
+            rows: mockItems(1),
         });
 
         const result = await buildAiSummaryResponse(['feed-a'], 7);

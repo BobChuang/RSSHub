@@ -9,13 +9,36 @@ const markdown = MarkdownIt({
     linkify: true,
 });
 const larkMarkdownChunkLength = 4000;
-const summaryBatchItemLimit = 1000;
+const summaryItemLimit = 500;
+const summaryItemContentLimit = 240;
+const summaryCacheTtlMs = 5 * 60 * 1000;
+const defaultAiMaxTokens = 3000;
+const defaultAiTimeoutMs = 180000;
 const linkPreservationInstruction = [
     '链接保留要求：',
     '1. 每条具体内容如果引用原始文章，链接行必须紧跟对应内容下方，格式为：链接：<原始URL>。',
     '2. 链接必须从输入内容的 Link 字段原样复制，不能留空、不能编造。',
     '3. 如果某条内容没有可用链接，不要输出“链接：”行。',
 ].join('\n');
+
+type SummaryInputItem = ReaderItem & {
+    feedGroup: string;
+    feedTitle: string;
+};
+
+type AiSummaryResult = {
+    configured: boolean;
+    message: string;
+    summary: string;
+    prompt: string;
+};
+
+type CachedAiSummary = {
+    expiresAt: number;
+    result: AiSummaryResult;
+};
+
+const aiSummaryCache = new Map<string, CachedAiSummary>();
 
 export const defaultAiSummaryPrompt = [
     '请用中文总结这个 RSS 订阅源最近 {{days}} 天的内容。',
@@ -66,10 +89,10 @@ function limitText(value: string, maxLength: number) {
     return value.length > maxLength ? value.slice(0, maxLength) + '...' : value;
 }
 
-function buildSummaryItemsText(items) {
+function buildSummaryItemsText(items: SummaryInputItem[]) {
     return items
         .map((item, index) => {
-            const content = limitText(stripHtml(item.summary || item.description || ''), 420);
+            const content = limitText(stripHtml(item.summary || item.description || ''), summaryItemContentLimit);
             const source = [item.feedGroup, item.feedTitle].filter(Boolean).join(' / ');
             return [
                 `${index + 1}. ${item.title}`,
@@ -104,57 +127,19 @@ function replacePromptToken(value: string, token: string, replacement: string) {
     return value.split(token).join(replacement);
 }
 
-function renderSummaryPrompt(promptTemplate: string, items, days: number) {
+function renderSummaryPrompt(promptTemplate: string, items: SummaryInputItem[], days: number, totalItemCount = items.length) {
     const itemsText = buildSummaryItemsText(items);
     const hasItemsPlaceholder = promptTemplate.includes('{{items}}');
     const promptWithDays = replacePromptToken(promptTemplate, '{{days}}', String(days));
-    const promptWithItemCount = replacePromptToken(promptWithDays, '{{itemCount}}', String(items.length));
+    const promptWithItemCount = replacePromptToken(promptWithDays, '{{itemCount}}', String(totalItemCount));
     const prompt = replacePromptToken(promptWithItemCount, '{{items}}', itemsText);
+    const selectionNotice = totalItemCount > items.length ? `原始范围共有 ${totalItemCount} 条内容，以下按频道均衡选取 ${items.length} 条代表性内容。` : `共收集到 ${items.length} 条内容。`;
 
     if (hasItemsPlaceholder) {
-        return [linkPreservationInstruction, '', prompt].join('\n');
+        return [selectionNotice, linkPreservationInstruction, '', prompt].join('\n');
     }
 
-    return [prompt, '', linkPreservationInstruction, '', `共收集到 ${items.length} 条：`, itemsText].join('\n');
-}
-
-function getBatches<T>(items: T[], batchSize: number) {
-    const batches: T[][] = [];
-    for (let index = 0; index < items.length; index += batchSize) {
-        batches.push(items.slice(index, index + batchSize));
-    }
-    return batches;
-}
-
-function renderBatchSummaryPrompt(promptTemplate: string, items, days: number, batchIndex: number, batchCount: number, itemCount: number) {
-    return [
-        `这是第 ${batchIndex + 1}/${batchCount} 批内容，全部时间范围内共有 ${itemCount} 条。请先只总结本批，保留重要事实、频道、链接和趋势，供最终汇总使用。`,
-        '本批输出里，具体内容的链接行必须紧跟对应内容下方，并从输入 Link 字段原样复制。',
-        '',
-        renderSummaryPrompt(promptTemplate, items, days),
-    ].join('\n');
-}
-
-function renderFinalSummaryPrompt(promptTemplate: string, batchSummaries: string[], days: number, itemCount: number) {
-    const summaryText = batchSummaries.map((summary, index) => [`批次 ${index + 1}`, summary].join('\n')).join('\n\n');
-    const promptWithDays = replacePromptToken(promptTemplate, '{{days}}', String(days));
-    const promptWithItemCount = replacePromptToken(promptWithDays, '{{itemCount}}', String(itemCount));
-    const promptWithoutItems = replacePromptToken(promptWithItemCount, '{{items}}', '见下方分批总结');
-
-    return [
-        '下面是同一批 RSS 内容按 1000 条分批生成的中间总结。请基于全部中间总结生成最终总结，不要遗漏跨批次反复出现的趋势、重要频道和关键链接。',
-        '最终总结引用某条具体内容时，链接行必须紧跟对应内容下方，并从批次摘要里原样复制。',
-        '不要输出空的“链接：”行；如果找不到对应链接，就不要列出这条具体内容。',
-        '',
-        '原始总结要求：',
-        promptWithoutItems,
-        '',
-        linkPreservationInstruction,
-        '',
-        `原始内容总数：${itemCount} 条 / 分批数：${batchSummaries.length}`,
-        '',
-        summaryText,
-    ].join('\n');
+    return [prompt, '', linkPreservationInstruction, '', selectionNotice, itemsText].join('\n');
 }
 
 function renderSummaryMarkdown(value: string) {
@@ -185,35 +170,80 @@ async function getSummaryItems(feedIds: string[], days: number) {
     }));
 }
 
-async function requestAiSummaryForItems(promptTemplate: string, items, days: number) {
-    const batches = getBatches(items, summaryBatchItemLimit);
-    if (batches.length <= 1) {
-        const prompt = renderSummaryPrompt(promptTemplate, items, days);
-        return {
-            ...withCleanSummaryLinks(await requestAiSummary(prompt)),
-            prompt,
-        };
+function selectSummaryItems(items: SummaryInputItem[], feedIds: string[]) {
+    if (items.length <= summaryItemLimit) {
+        return items;
     }
 
-    const batchResults = await Promise.all(
-        batches.map(async (batchItems, index) => {
-            const prompt = renderBatchSummaryPrompt(promptTemplate, batchItems, days, index, batches.length, items.length);
-            return {
-                prompt,
-                result: withCleanSummaryLinks(await requestAiSummary(prompt)),
-            };
-        })
-    );
-    const failedBatch = batchResults.find(({ result }) => !result.configured || !result.summary);
-    if (failedBatch) {
-        return {
-            ...failedBatch.result,
-            prompt: failedBatch.prompt,
-        };
+    const itemsByFeedId = new Map<string, SummaryInputItem[]>();
+    for (const feedId of feedIds) {
+        itemsByFeedId.set(feedId, []);
     }
-    const batchSummaries = batchResults.map(({ result }) => result.summary);
+    for (const item of items) {
+        const feedItems = itemsByFeedId.get(item.feedId);
+        if (feedItems) {
+            feedItems.push(item);
+        } else {
+            itemsByFeedId.set(item.feedId, [item]);
+        }
+    }
 
-    const prompt = renderFinalSummaryPrompt(promptTemplate, batchSummaries, days, items.length);
+    const selectedItems: SummaryInputItem[] = [];
+    let itemIndex = 0;
+    while (selectedItems.length < summaryItemLimit) {
+        let selectedFromAnyFeed = false;
+        for (const feedItems of itemsByFeedId.values()) {
+            const item = feedItems[itemIndex];
+            if (!item) {
+                continue;
+            }
+            selectedItems.push(item);
+            selectedFromAnyFeed = true;
+            if (selectedItems.length >= summaryItemLimit) {
+                break;
+            }
+        }
+        if (!selectedFromAnyFeed) {
+            break;
+        }
+        itemIndex++;
+    }
+
+    return selectedItems.toSorted((left, right) => right.pubDateMs - left.pubDateMs || right.id.localeCompare(left.id));
+}
+
+function createSummaryCacheKey(feedIds: string[], days: number, promptTemplate: string, items: SummaryInputItem[], totalItemCount: number) {
+    const itemSignature = items.map((item) => `${item.id}:${item.pubDateMs}`).join('|');
+    return JSON.stringify({ days, feedIds: [...feedIds].toSorted((left, right) => left.localeCompare(right)), itemSignature, promptTemplate, totalItemCount });
+}
+
+function getCachedAiSummary(cacheKey: string) {
+    const cached = aiSummaryCache.get(cacheKey);
+    if (!cached) {
+        return;
+    }
+    if (cached.expiresAt <= Date.now()) {
+        aiSummaryCache.delete(cacheKey);
+        return;
+    }
+    return cached.result;
+}
+
+function cacheAiSummary(cacheKey: string, result: AiSummaryResult) {
+    if (result.configured && result.summary) {
+        aiSummaryCache.set(cacheKey, {
+            expiresAt: Date.now() + summaryCacheTtlMs,
+            result,
+        });
+    }
+}
+
+export function clearAiSummaryCache() {
+    aiSummaryCache.clear();
+}
+
+async function requestAiSummaryForItems(promptTemplate: string, items: SummaryInputItem[], days: number, totalItemCount = items.length) {
+    const prompt = renderSummaryPrompt(promptTemplate, items, days, totalItemCount);
     return {
         ...withCleanSummaryLinks(await requestAiSummary(prompt)),
         prompt,
@@ -230,19 +260,28 @@ export async function buildAiSummaryResponse(feedIds: string[], days: number, pr
         await (isSingleFeed ? updateFeedsAiSummaryPrompt(feedIds, promptTemplate) : updateMultiAiSummaryPrompt(promptTemplate));
     }
     const items = await getSummaryItems(feedIds, days);
-    const aiResult = items.length
-        ? await requestAiSummaryForItems(promptTemplate, items, days)
-        : {
-              configured: Boolean((process.env.READER_AI_API_KEY || process.env.OPENAI_API_KEY) && process.env.READER_AI_MODEL),
-              message: '',
-              prompt: renderSummaryPrompt(promptTemplate, items, days),
-              summary: '',
-          };
+    const summaryItems = selectSummaryItems(items, feedIds);
+    const cacheKey = createSummaryCacheKey(feedIds, days, promptTemplate, summaryItems, items.length);
+    const cachedAiResult = summaryItems.length ? getCachedAiSummary(cacheKey) : undefined;
+    const aiResult =
+        cachedAiResult ||
+        (summaryItems.length
+            ? await requestAiSummaryForItems(promptTemplate, summaryItems, days, items.length)
+            : {
+                  configured: Boolean((process.env.READER_AI_API_KEY || process.env.OPENAI_API_KEY) && process.env.READER_AI_MODEL),
+                  message: '',
+                  prompt: renderSummaryPrompt(promptTemplate, summaryItems, days, items.length),
+                  summary: '',
+              });
+    if (!cachedAiResult && summaryItems.length) {
+        cacheAiSummary(cacheKey, aiResult);
+    }
 
     return {
         ...aiResult,
         days,
         itemCount: items.length,
+        summarizedItemCount: summaryItems.length,
         prompt: aiResult.prompt,
         promptTemplate,
         summaryHtml: renderSummaryMarkdown(aiResult.summary),
@@ -274,27 +313,45 @@ async function requestAiSummary(prompt: string) {
         };
     }
 
-    const response = await fetch(requestUrl, {
-        body: JSON.stringify({
-            messages: [
-                {
-                    content: 'You summarize RSS reader content clearly and concisely in Chinese.',
-                    role: 'system',
-                },
-                {
-                    content: prompt,
-                    role: 'user',
-                },
-            ],
-            model,
-            temperature: 0.2,
-        }),
-        headers: {
-            authorization: `Bearer ${apiKey}`,
-            'content-type': 'application/json',
-        },
-        method: 'POST',
-    });
+    const configuredMaxTokens = Number(process.env.READER_AI_MAX_TOKENS);
+    const maxTokens = Number.isSafeInteger(configuredMaxTokens) && configuredMaxTokens > 0 ? configuredMaxTokens : defaultAiMaxTokens;
+    const configuredTimeoutMs = Number(process.env.READER_AI_TIMEOUT_MS);
+    const timeoutMs = Number.isSafeInteger(configuredTimeoutMs) && configuredTimeoutMs > 0 ? configuredTimeoutMs : defaultAiTimeoutMs;
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
+    let response: Response;
+    try {
+        response = await fetch(requestUrl, {
+            body: JSON.stringify({
+                max_tokens: maxTokens,
+                messages: [
+                    {
+                        content: 'You summarize RSS reader content clearly and concisely in Chinese.',
+                        role: 'system',
+                    },
+                    {
+                        content: prompt,
+                        role: 'user',
+                    },
+                ],
+                model,
+                temperature: 0.2,
+            }),
+            headers: {
+                authorization: `Bearer ${apiKey}`,
+                'content-type': 'application/json',
+            },
+            method: 'POST',
+            signal: controller.signal,
+        });
+    } catch (error) {
+        if (controller.signal.aborted) {
+            throw new Error(`AI summary request timed out after ${timeoutMs} ms.`, { cause: error });
+        }
+        throw error;
+    } finally {
+        clearTimeout(timeout);
+    }
     const data = await response.json();
     if (!response.ok) {
         throw new Error(data?.error?.message || 'AI summary request failed.');
@@ -476,10 +533,11 @@ function getAiSummaryWebhookMessage(push: ReaderAiSummaryPush, result): WebhookM
             days: result.days,
             feedIds: push.feedIds,
             itemCount: result.itemCount,
+            summarizedItemCount: result.summarizedItemCount,
             summary: result.summary,
             summaryHtml: result.summaryHtml,
         },
-        meta: `最近 ${result.days} 天 / ${result.itemCount} 条内容`,
+        meta: result.summarizedItemCount < result.itemCount ? `最近 ${result.days} 天 / 共 ${result.itemCount} 条内容，已总结 ${result.summarizedItemCount} 条` : `最近 ${result.days} 天 / ${result.itemCount} 条内容`,
         title: push.title || (push.feedIds.length > 1 ? '多频道 AI 总结' : 'AI 总结'),
     };
 }
