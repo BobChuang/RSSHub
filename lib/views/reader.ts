@@ -5,8 +5,8 @@ export const readerHtml = String.raw`<!doctype html>
         <meta name="viewport" content="width=device-width, initial-scale=1">
         <title>RSSHub Reader</title>
         <link rel="icon" href="/favicon.png">
-        <link rel="stylesheet" href="/reader/app.css?v=ai-summary-push-tasks">
-        <script type="module" src="/reader/app.js?v=ai-summary-push-tasks"></script>
+        <link rel="stylesheet" href="/reader/app.css?v=ai-summary-performance">
+        <script type="module" src="/reader/app.js?v=ai-summary-performance"></script>
     </head>
     <body>
         <main class="app-shell">
