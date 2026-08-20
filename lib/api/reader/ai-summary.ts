@@ -11,12 +11,14 @@ const markdown = MarkdownIt({
     linkify: true,
 });
 const larkMarkdownChunkLength = 4000;
-const summaryItemLimit = 500;
 const summaryItemContentLimit = 240;
+const summaryBatchItemLimit = 200;
+const summaryBatchConcurrency = 4;
+const summaryBatchMaxTokens = 900;
 const summaryCacheTtlMs = 5 * 60 * 1000;
 const defaultAiMaxTokens = 3000;
 const defaultAiTimeoutMs = 180000;
-const summaryCacheVersion = 2;
+const summaryCacheVersion = 3;
 const linkPreservationInstruction = [
     '链接保留要求：',
     '1. 每条具体内容如果引用原始文章，链接行必须紧跟对应内容下方，格式为：链接：<原始URL>。',
@@ -140,19 +142,18 @@ function replacePromptToken(value: string, token: string, replacement: string) {
     return value.split(token).join(replacement);
 }
 
-function renderSummaryPrompt(promptTemplate: string, items: SummaryInputItem[], days: number, totalItemCount = items.length) {
+function renderSummaryPrompt(promptTemplate: string, items: SummaryInputItem[], days: number, totalItemCount = items.length, contentNotice = `共收集到 ${items.length} 条内容。`) {
     const itemsText = buildSummaryItemsText(items);
     const hasItemsPlaceholder = promptTemplate.includes('{{items}}');
     const promptWithDays = replacePromptToken(promptTemplate, '{{days}}', String(days));
     const promptWithItemCount = replacePromptToken(promptWithDays, '{{itemCount}}', String(totalItemCount));
     const prompt = replacePromptToken(promptWithItemCount, '{{items}}', itemsText);
-    const selectionNotice = totalItemCount > items.length ? `原始范围共有 ${totalItemCount} 条内容，以下按频道均衡选取 ${items.length} 条代表性内容。` : `共收集到 ${items.length} 条内容。`;
 
     if (hasItemsPlaceholder) {
-        return [selectionNotice, linkPreservationInstruction, '', prompt].join('\n');
+        return [contentNotice, linkPreservationInstruction, '', prompt].join('\n');
     }
 
-    return [prompt, '', linkPreservationInstruction, '', selectionNotice, itemsText].join('\n');
+    return [prompt, '', linkPreservationInstruction, '', contentNotice, itemsText].join('\n');
 }
 
 function renderSummaryMarkdown(value: string) {
@@ -183,48 +184,6 @@ async function getSummaryItems(feedIds: string[], days: number) {
     }));
 }
 
-function selectSummaryItems(items: SummaryInputItem[], feedIds: string[]) {
-    if (items.length <= summaryItemLimit) {
-        return items;
-    }
-
-    const itemsByFeedId = new Map<string, SummaryInputItem[]>();
-    for (const feedId of feedIds) {
-        itemsByFeedId.set(feedId, []);
-    }
-    for (const item of items) {
-        const feedItems = itemsByFeedId.get(item.feedId);
-        if (feedItems) {
-            feedItems.push(item);
-        } else {
-            itemsByFeedId.set(item.feedId, [item]);
-        }
-    }
-
-    const selectedItems: SummaryInputItem[] = [];
-    let itemIndex = 0;
-    while (selectedItems.length < summaryItemLimit) {
-        let selectedFromAnyFeed = false;
-        for (const feedItems of itemsByFeedId.values()) {
-            const item = feedItems[itemIndex];
-            if (!item) {
-                continue;
-            }
-            selectedItems.push(item);
-            selectedFromAnyFeed = true;
-            if (selectedItems.length >= summaryItemLimit) {
-                break;
-            }
-        }
-        if (!selectedFromAnyFeed) {
-            break;
-        }
-        itemIndex++;
-    }
-
-    return selectedItems.toSorted((left, right) => right.pubDateMs - left.pubDateMs || right.id.localeCompare(left.id));
-}
-
 function createSummaryCacheKey(feedIds: string[], days: number, promptTemplate: string) {
     return JSON.stringify({ days, feedIds: [...feedIds].toSorted((left, right) => left.localeCompare(right)), promptTemplate, version: summaryCacheVersion });
 }
@@ -252,23 +211,95 @@ export function clearAiSummaryCache() {
     aiSummaryInFlight.clear();
 }
 
-async function requestAiSummaryForItems(promptTemplate: string, items: SummaryInputItem[], days: number, totalItemCount = items.length) {
-    const prompt = renderSummaryPrompt(promptTemplate, items, days, totalItemCount);
-    return {
-        ...withCleanSummaryLinks(await requestAiSummary(prompt)),
+function splitSummaryItems(items: SummaryInputItem[]) {
+    return Array.from({ length: Math.ceil(items.length / summaryBatchItemLimit) }, (_, index) => items.slice(index * summaryBatchItemLimit, (index + 1) * summaryBatchItemLimit));
+}
+
+function renderBatchSummaryPrompt(promptTemplate: string, items: SummaryInputItem[], days: number, batchIndex: number, batchCount: number, totalItemCount: number) {
+    const contentNotice = `整个范围共有 ${totalItemCount} 条内容；这是第 ${batchIndex}/${batchCount} 批，本批包含 ${items.length} 条内容，以下是本批全部内容。`;
+    return [
+        `这是分批总结任务的第 ${batchIndex}/${batchCount} 批。`,
+        `请处理本批全部 ${items.length} 条内容，不要只挑选代表性内容；提炼本批最重要的事实、趋势、来源频道和原始链接，输出精炼的中间总结，供最终汇总使用。`,
+        renderSummaryPrompt(promptTemplate, items, days, totalItemCount, contentNotice),
+    ].join('\n\n');
+}
+
+function renderFinalSummaryPrompt(promptTemplate: string, batchSummaries: string[], days: number, totalItemCount: number) {
+    const summariesText = batchSummaries.map((summary, index) => `第 ${index + 1}/${batchSummaries.length} 批中间总结：\n${summary}`).join('\n\n');
+    const prompt = renderSummaryPrompt(promptTemplate, [], days, totalItemCount, `整个范围共有 ${totalItemCount} 条内容，已通过 ${batchSummaries.length} 个批次全部处理。`);
+    return [
+        '这是分批总结任务的最终汇总阶段。',
+        `下面的 ${batchSummaries.length} 份中间总结覆盖了全部 ${totalItemCount} 条原始内容。请综合所有批次，合并重复信息，不要遗漏任何批次，也不要声称只总结了部分内容。`,
+        '最终输出请保留最重要的事实、趋势、频道归属和值得阅读的内容；引用原始内容时，只使用中间总结中出现的真实链接。',
         prompt,
+        '全部批次的中间总结：',
+        summariesText,
+    ].join('\n\n');
+}
+
+async function mapWithConcurrency<T, TResult>(items: T[], concurrency: number, mapper: (item: T, index: number) => Promise<TResult>) {
+    const results = [] as TResult[];
+    results.length = items.length;
+    let nextIndex = 0;
+    const worker = async () => {
+        const index = nextIndex++;
+        if (index >= items.length) {
+            return;
+        }
+        results[index] = await mapper(items[index], index);
+        return worker();
+    };
+    await Promise.all(Array.from({ length: Math.min(concurrency, items.length) }, () => worker()));
+    return results;
+}
+
+async function requestAiSummaryForItems(promptTemplate: string, items: SummaryInputItem[], days: number, totalItemCount = items.length) {
+    if (items.length <= summaryBatchItemLimit) {
+        const prompt = renderSummaryPrompt(promptTemplate, items, days, totalItemCount);
+        return {
+            ...withCleanSummaryLinks(await requestAiSummary(prompt)),
+            prompt,
+        };
+    }
+
+    const batches = splitSummaryItems(items);
+    logger.info(`Reader AI summary batching: itemCount=${items.length} batchCount=${batches.length} batchSize=${summaryBatchItemLimit}`);
+    const batchResults = await mapWithConcurrency(batches, summaryBatchConcurrency, async (batch, index) => {
+        const prompt = renderBatchSummaryPrompt(promptTemplate, batch, days, index + 1, batches.length, totalItemCount);
+        const result = await requestAiSummary(prompt, summaryBatchMaxTokens);
+        return {
+            ...withCleanSummaryLinks(result),
+            prompt,
+        };
+    });
+    const incompleteBatch = batchResults.find((result) => !result.configured || !result.summary);
+    if (incompleteBatch) {
+        return {
+            ...incompleteBatch,
+            prompt: incompleteBatch.prompt,
+        };
+    }
+
+    const finalPrompt = renderFinalSummaryPrompt(
+        promptTemplate,
+        batchResults.map((result) => result.summary),
+        days,
+        totalItemCount
+    );
+    return {
+        ...withCleanSummaryLinks(await requestAiSummary(finalPrompt)),
+        prompt: finalPrompt,
     };
 }
 
 async function generateAiSummaryCacheEntry(feedIds: string[], days: number, promptTemplate: string): Promise<AiSummaryCacheEntry> {
     const items = await getSummaryItems(feedIds, days);
-    const summaryItems = selectSummaryItems(items, feedIds);
-    const aiResult = summaryItems.length
-        ? await requestAiSummaryForItems(promptTemplate, summaryItems, days, items.length)
+    const aiResult = items.length
+        ? await requestAiSummaryForItems(promptTemplate, items, days)
         : {
               configured: Boolean((process.env.READER_AI_API_KEY || process.env.OPENAI_API_KEY) && process.env.READER_AI_MODEL),
               message: '',
-              prompt: renderSummaryPrompt(promptTemplate, summaryItems, days, items.length),
+              prompt: renderSummaryPrompt(promptTemplate, items, days),
               summary: '',
           };
     const createdAt = Date.now();
@@ -277,7 +308,7 @@ async function generateAiSummaryCacheEntry(feedIds: string[], days: number, prom
         expiresAt: createdAt + summaryCacheTtlMs,
         itemCount: items.length,
         result: aiResult,
-        summarizedItemCount: summaryItems.length,
+        summarizedItemCount: items.length,
     };
 }
 
@@ -346,7 +377,7 @@ function getAiRequestUrl() {
     return requestUrl;
 }
 
-async function requestAiSummary(prompt: string) {
+async function requestAiSummary(prompt: string, maxTokensOverride?: number) {
     const apiKey = process.env.READER_AI_API_KEY || process.env.OPENAI_API_KEY;
     const model = process.env.READER_AI_MODEL;
     const requestUrl = getAiRequestUrl();
@@ -360,7 +391,8 @@ async function requestAiSummary(prompt: string) {
     }
 
     const configuredMaxTokens = Number(process.env.READER_AI_MAX_TOKENS);
-    const maxTokens = Number.isSafeInteger(configuredMaxTokens) && configuredMaxTokens > 0 ? configuredMaxTokens : defaultAiMaxTokens;
+    const configuredMaxTokensValue = Number.isSafeInteger(configuredMaxTokens) && configuredMaxTokens > 0 ? configuredMaxTokens : defaultAiMaxTokens;
+    const maxTokens = maxTokensOverride ? Math.min(configuredMaxTokensValue, maxTokensOverride) : configuredMaxTokensValue;
     const configuredTimeoutMs = Number(process.env.READER_AI_TIMEOUT_MS);
     const timeoutMs = Number.isSafeInteger(configuredTimeoutMs) && configuredTimeoutMs > 0 ? configuredTimeoutMs : defaultAiTimeoutMs;
     const controller = new AbortController();

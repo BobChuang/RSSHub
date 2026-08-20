@@ -157,20 +157,23 @@ describe('reader ai summary', () => {
         expect(result.summary).not.toContain('链接:\n');
     });
 
-    it('limits oversized summaries while preserving the fetched item count', async () => {
-        const fetchMock = mockAiFetch();
+    it('summarizes every oversized item in controlled batches', async () => {
+        const fetchMock = mockAiFetch((prompt) => (prompt.includes('最终汇总阶段') ? 'final summary\n链接：https://example.com/items/401' : 'batch summary'));
         mocks.getPoolQuery.mockResolvedValue({
-            rows: mockItems(1000),
+            rows: mockItems(401),
         });
 
         const result = await buildAiSummaryResponse(['feed-a'], 7);
+        const batchPrompts = fetchMock.mock.calls.slice(0, 3).map((call) => JSON.parse(String(call[1].body)).messages[1].content);
 
-        expect(fetchMock).toHaveBeenCalledTimes(1);
-        expect(result.itemCount).toBe(1000);
-        expect(result.summarizedItemCount).toBe(500);
-        expect(result.summary).toContain('链接：https://example.com/items/1');
-        expect(result.prompt).not.toContain('Title 1000');
-        expect(result.prompt).toContain('原始范围共有 1000 条内容');
+        expect(fetchMock).toHaveBeenCalledTimes(4);
+        expect(result.itemCount).toBe(401);
+        expect(result.summarizedItemCount).toBe(401);
+        expect(result.summary).toContain('链接：https://example.com/items/401');
+        expect(batchPrompts.join('\n')).toContain('Title 1');
+        expect(batchPrompts.join('\n')).toContain('Title 401');
+        expect(result.prompt).toContain('第 1/3 批中间总结');
+        expect(result.prompt).not.toContain('代表性内容');
     });
 
     it('reuses a recent summary for the same input', async () => {
@@ -205,18 +208,20 @@ describe('reader ai summary', () => {
         expect(result.cacheSource).toBe('fresh');
     });
 
-    it('samples multiple feeds in a round-robin order', async () => {
-        const fetchMock = mockAiFetch((prompt) => prompt);
+    it('includes all items from multiple feeds in controlled batches', async () => {
+        const fetchMock = mockAiFetch((prompt) => (prompt.includes('最终汇总阶段') ? 'final summary' : prompt));
         mocks.getPoolQuery.mockResolvedValue({
             rows: [...mockItems(400, 'feed-a', 0, 'Feed A'), ...mockItems(400, 'feed-b', 400, 'Feed B')],
         });
 
         const result = await buildAiSummaryResponse(['feed-a', 'feed-b'], 7);
-        const requestBody = JSON.parse(String(fetchMock.mock.calls[0][1].body));
+        const batchPrompts = fetchMock.mock.calls.slice(0, 4).map((call) => JSON.parse(String(call[1].body)).messages[1].content);
 
-        expect(result.summarizedItemCount).toBe(500);
-        expect(requestBody.messages[1].content).toContain('Source: Feed A');
-        expect(requestBody.messages[1].content).toContain('Source: Feed B');
+        expect(fetchMock).toHaveBeenCalledTimes(5);
+        expect(result.itemCount).toBe(800);
+        expect(result.summarizedItemCount).toBe(800);
+        expect(batchPrompts.join('\n')).toContain('Source: Feed A');
+        expect(batchPrompts.join('\n')).toContain('Source: Feed B');
     });
 
     it('removes empty link lines from the summary result', async () => {
