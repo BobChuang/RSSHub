@@ -1200,7 +1200,7 @@ export async function upsertAiSummaryBatch(cacheKey: string, batch: ReaderAiSumm
     await getPool().query(
         `
             INSERT INTO reader_ai_summary_batches (cache_key, configured, message, summary, created_at, expires_at)
-            VALUES ($1, $2, $3, $4, TO_TIMESTAMP($5 / 1000.0), CASE WHEN $6 IS NULL THEN NULL ELSE TO_TIMESTAMP($6 / 1000.0) END)
+            VALUES ($1, $2, $3, $4, TO_TIMESTAMP($5 / 1000.0), CASE WHEN $6::double precision IS NULL THEN NULL ELSE TO_TIMESTAMP($6::double precision / 1000.0) END)
             ON CONFLICT (cache_key) DO UPDATE SET
                 configured = EXCLUDED.configured,
                 message = EXCLUDED.message,

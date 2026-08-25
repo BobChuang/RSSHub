@@ -406,6 +406,7 @@ async function requestAiSummaryForItems(promptTemplate: string, items: SummaryIn
         const batchCacheKey = createSummaryBatchCacheKey(promptTemplate, items, days);
         const cachedBatch = await getCachedAiSummaryBatch(batchCacheKey);
         if (cachedBatch) {
+            logger.info(`Reader AI summary batch cache hit: batch=1/1 itemCount=${items.length} persistent=${items.length === summaryBatchItemLimit}`);
             reportAiSummaryProgress(onProgress, {
                 completedBatches: 1,
                 currentBatch: 1,
@@ -419,6 +420,7 @@ async function requestAiSummaryForItems(promptTemplate: string, items: SummaryIn
                 prompt,
             };
         }
+        logger.info(`Reader AI summary batch cache miss: batch=1/1 itemCount=${items.length} persistent=${items.length === summaryBatchItemLimit}`);
         reportAiSummaryProgress(onProgress, {
             completedBatches: 0,
             currentBatch: 1,
@@ -460,6 +462,7 @@ async function requestAiSummaryForItems(promptTemplate: string, items: SummaryIn
         const batchCacheKey = createSummaryBatchCacheKey(promptTemplate, batch, days);
         const cachedBatch = await getCachedAiSummaryBatch(batchCacheKey);
         if (cachedBatch) {
+            logger.info(`Reader AI summary batch cache hit: batch=${index + 1}/${batchCount} itemCount=${batch.length} persistent=${batch.length === summaryBatchItemLimit}`);
             completedBatches++;
             reportAiSummaryProgress(onProgress, {
                 completedBatches,
@@ -474,6 +477,7 @@ async function requestAiSummaryForItems(promptTemplate: string, items: SummaryIn
                 prompt,
             };
         }
+        logger.info(`Reader AI summary batch cache miss: batch=${index + 1}/${batchCount} itemCount=${batch.length} persistent=${batch.length === summaryBatchItemLimit}`);
         reportAiSummaryProgress(onProgress, {
             completedBatches,
             currentBatch: index + 1,
