@@ -1769,11 +1769,23 @@ a.reader-action {
 
 .ai-summary-meta,
 .ai-summary-placeholder,
-.ai-summary-error {
+.ai-summary-error,
+.ai-summary-progress-title,
+.ai-summary-progress-meta {
     margin: 0;
     color: var(--muted);
     font-size: 13px;
     line-height: 1.5;
+}
+
+.ai-summary-progress-title {
+    color: var(--ink);
+    font-size: 16px;
+    font-weight: 700;
+}
+
+.ai-summary-progress-meta {
+    color: var(--muted);
 }
 
 .ai-summary-error {

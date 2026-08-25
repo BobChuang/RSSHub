@@ -80,7 +80,7 @@ export const errorHandler: ErrorHandler = (error, ctx) => {
     logger.error(`Error in ${requestPath}: ${message}`);
     requestMetric.error({ path: matchedRoute, method: ctx.req.method, status: ctx.res.status });
 
-    return config.isPackage || ctx.req.query('format') === 'json'
+    return config.isPackage || ctx.req.query('format') === 'json' || ctx.req.path.startsWith('/api/')
         ? ctx.json({
               error: {
                   message: error.message ?? error,

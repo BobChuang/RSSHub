@@ -1,6 +1,7 @@
 import { Hono } from 'hono';
 
 import { buildAiSummaryResponse, normalizeSummaryDays, normalizeSummaryFeedIds } from './reader/ai-summary';
+import { createAiSummaryJob, getAiSummaryJob } from './reader/ai-summary-jobs';
 import { defaultEventMonitorPrompt, detectProductEvents } from './reader/event-detection';
 import { refreshFeed } from './reader/scheduler';
 import {
@@ -685,6 +686,14 @@ app.post('/feeds/:feedId/ai-summary', async (ctx) => {
     return ctx.json(result);
 });
 
+app.post('/feeds/:feedId/ai-summary/jobs', async (ctx) => {
+    const body = await ctx.req.json();
+    const days = normalizeSummaryDays(body.days);
+    const job = createAiSummaryJob([ctx.req.param('feedId')], days, body.prompt, body.savePrompt === true, { forceRefresh: body.forceRefresh === true });
+
+    return ctx.json(job, 202);
+});
+
 app.post('/feeds/ai-summary', async (ctx) => {
     const body = await ctx.req.json();
     const days = normalizeSummaryDays(body.days);
@@ -692,6 +701,23 @@ app.post('/feeds/ai-summary', async (ctx) => {
     const result = await buildAiSummaryResponse(feedIds, days, body.prompt, body.savePrompt === true, { forceRefresh: body.forceRefresh === true });
 
     return ctx.json(result);
+});
+
+app.post('/feeds/ai-summary/jobs', async (ctx) => {
+    const body = await ctx.req.json();
+    const days = normalizeSummaryDays(body.days);
+    const feedIds = normalizeSummaryFeedIds(body.feedIds);
+    const job = createAiSummaryJob(feedIds, days, body.prompt, body.savePrompt === true, { forceRefresh: body.forceRefresh === true });
+
+    return ctx.json(job, 202);
+});
+
+app.get('/ai-summary/jobs/:jobId', (ctx) => {
+    const job = getAiSummaryJob(ctx.req.param('jobId'));
+    if (!job) {
+        return ctx.json({ error: 'AI summary job not found.' }, 404);
+    }
+    return ctx.json(job);
 });
 
 app.post('/discord-author-roles/lookup', async (ctx) => {

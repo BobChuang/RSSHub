@@ -1,17 +1,20 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const mocks = vi.hoisted(() => ({
+    getAiSummaryBatch: vi.fn(),
     getFeedsAiSummaryPrompt: vi.fn(),
     getMultiAiSummaryPrompt: vi.fn(),
     getPoolQuery: vi.fn(),
     rowToItem: vi.fn(),
     updateFeedsAiSummaryPrompt: vi.fn(),
     updateMultiAiSummaryPrompt: vi.fn(),
+    upsertAiSummaryBatch: vi.fn(),
 }));
 
 const originalReaderAiApiKey = process.env.READER_AI_API_KEY;
 const originalReaderAiModel = process.env.READER_AI_MODEL;
 const originalReaderAiRequestUrl = process.env.READER_AI_REQUEST_URL;
+const originalReaderAiRetries = process.env.READER_AI_RETRIES;
 
 function restoreEnv(key: string, value: string | undefined) {
     if (value === undefined) {
@@ -57,6 +60,18 @@ function mockAiFetch(
                     ],
                 }),
             ok: true,
+            text: () =>
+                Promise.resolve(
+                    JSON.stringify({
+                        choices: [
+                            {
+                                message: {
+                                    content: summary,
+                                },
+                            },
+                        ],
+                    })
+                ),
         } as Response);
     });
     vi.stubGlobal('fetch', fetchMock);
@@ -64,6 +79,7 @@ function mockAiFetch(
 }
 
 vi.mock('./store', () => ({
+    getAiSummaryBatch: mocks.getAiSummaryBatch,
     getFeedsAiSummaryPrompt: mocks.getFeedsAiSummaryPrompt,
     getMultiAiSummaryPrompt: mocks.getMultiAiSummaryPrompt,
     getPool: () => ({
@@ -72,6 +88,7 @@ vi.mock('./store', () => ({
     rowToItem: mocks.rowToItem,
     updateFeedsAiSummaryPrompt: mocks.updateFeedsAiSummaryPrompt,
     updateMultiAiSummaryPrompt: mocks.updateMultiAiSummaryPrompt,
+    upsertAiSummaryBatch: mocks.upsertAiSummaryBatch,
 }));
 
 const { buildAiSummaryResponse, clearAiSummaryCache, defaultMultiAiSummaryPrompt } = await import('./ai-summary');
@@ -91,6 +108,7 @@ describe('reader ai summary', () => {
         restoreEnv('READER_AI_API_KEY', originalReaderAiApiKey);
         restoreEnv('READER_AI_MODEL', originalReaderAiModel);
         restoreEnv('READER_AI_REQUEST_URL', originalReaderAiRequestUrl);
+        restoreEnv('READER_AI_RETRIES', originalReaderAiRetries);
         vi.unstubAllGlobals();
     });
 
@@ -174,6 +192,64 @@ describe('reader ai summary', () => {
         expect(batchPrompts.join('\n')).toContain('Title 401');
         expect(result.prompt).toContain('第 1/3 批中间总结');
         expect(result.prompt).not.toContain('代表性内容');
+    });
+
+    it('reports batch progress before the final aggregation', async () => {
+        mockAiFetch((prompt) => (prompt.includes('最终汇总阶段') ? 'final summary' : 'batch summary'));
+        mocks.getPoolQuery.mockResolvedValue({
+            rows: mockItems(401),
+        });
+        const progress = [];
+
+        await buildAiSummaryResponse(['feed-a'], 7, undefined, false, {
+            onProgress: (update) => {
+                progress.push(update);
+            },
+        });
+
+        expect(progress).toEqual(expect.arrayContaining([expect.objectContaining({ stage: 'collecting', itemCount: 401, totalBatches: 3 }), expect.objectContaining({ stage: 'finalizing', completedBatches: 3, totalBatches: 3 })]));
+        expect(progress.filter((update) => update.stage === 'batch' && update.completedBatches === 3)).toHaveLength(1);
+    });
+
+    it('reuses completed batches when final aggregation needs another attempt', async () => {
+        process.env.READER_AI_API_KEY = 'test-key';
+        process.env.READER_AI_MODEL = 'test-model';
+        process.env.READER_AI_REQUEST_URL = 'https://ai.example.test/chat/completions';
+        process.env.READER_AI_RETRIES = '0';
+        let finalAttempt = 0;
+        const fetchMock = vi.fn((_url: string, init: RequestInit) => {
+            const body = JSON.parse(String(init.body));
+            const prompt = body.messages.find((message) => message.role === 'user')?.content || '';
+            if (prompt.includes('最终汇总阶段')) {
+                finalAttempt++;
+                if (finalAttempt === 1) {
+                    return Promise.resolve({
+                        ok: false,
+                        status: 503,
+                        text: () => Promise.resolve(JSON.stringify({ error: { message: 'temporary final failure' } })),
+                    } as Response);
+                }
+                return Promise.resolve({
+                    ok: true,
+                    text: () => Promise.resolve(JSON.stringify({ choices: [{ message: { content: 'final summary' } }] })),
+                } as Response);
+            }
+            return Promise.resolve({
+                ok: true,
+                text: () => Promise.resolve(JSON.stringify({ choices: [{ message: { content: 'batch summary' } }] })),
+            } as Response);
+        });
+        vi.stubGlobal('fetch', fetchMock);
+        mocks.getPoolQuery.mockResolvedValue({
+            rows: mockItems(401),
+        });
+
+        await expect(buildAiSummaryResponse(['feed-a'], 7)).rejects.toThrow('temporary final failure');
+        const callsAfterFailure = fetchMock.mock.calls.length;
+        const result = await buildAiSummaryResponse(['feed-a'], 7);
+
+        expect(fetchMock).toHaveBeenCalledTimes(callsAfterFailure + 1);
+        expect(result.summary).toBe('final summary');
     });
 
     it('reuses a recent summary for the same input', async () => {

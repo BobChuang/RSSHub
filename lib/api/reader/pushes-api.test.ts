@@ -7,6 +7,7 @@ const mocks = vi.hoisted(() => ({
     deleteAiSummaryPush: vi.fn(),
     detectProductEvents: vi.fn(),
     ensureSchema: vi.fn(),
+    getAiSummaryBatch: vi.fn(),
     getAiSummaryPush: vi.fn(),
     getOpenReaderEventCount: vi.fn(),
     getReaderEvent: vi.fn(),
@@ -16,6 +17,7 @@ const mocks = vi.hoisted(() => ({
     query: vi.fn(),
     updateAiSummaryPush: vi.fn(),
     updateReaderEventStatus: vi.fn(),
+    upsertAiSummaryBatch: vi.fn(),
 }));
 
 vi.mock('./scheduler', () => ({
@@ -34,6 +36,7 @@ vi.mock('./store', () => ({
     deleteFeed: vi.fn(),
     deleteFeedItems: vi.fn(),
     ensureSchema: mocks.ensureSchema,
+    getAiSummaryBatch: mocks.getAiSummaryBatch,
     getAiSummaryPush: mocks.getAiSummaryPush,
     getDefaultAiSummaryPushTimezone: vi.fn(() => 'UTC'),
     getFeedsAiSummaryPrompt: vi.fn(),
@@ -63,6 +66,7 @@ vi.mock('./store', () => ({
     updateFeed: vi.fn(),
     updateFeedItemsCategory: vi.fn(),
     updateReaderEventStatus: mocks.updateReaderEventStatus,
+    upsertAiSummaryBatch: mocks.upsertAiSummaryBatch,
     updateFeedsAiSummaryPrompt: vi.fn(),
     updateMultiAiSummaryPrompt: vi.fn(),
     upsertFeed: vi.fn(),

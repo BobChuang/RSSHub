@@ -77,6 +77,14 @@ export type ReaderAiSummaryPush = {
     updatedAt: string;
 };
 
+export type ReaderAiSummaryBatch = {
+    configured: boolean;
+    message: string;
+    summary: string;
+    createdAt: number;
+    expiresAt: number;
+};
+
 export type ReaderFeedInput = {
     id?: string;
     url: string;
@@ -714,6 +722,17 @@ export async function ensureSchema() {
                 updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
             );
 
+            CREATE TABLE IF NOT EXISTS reader_ai_summary_batches (
+                cache_key TEXT PRIMARY KEY,
+                configured BOOLEAN NOT NULL DEFAULT TRUE,
+                message TEXT NOT NULL DEFAULT '',
+                summary TEXT NOT NULL DEFAULT '',
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                expires_at TIMESTAMPTZ NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS reader_ai_summary_batches_expires_idx ON reader_ai_summary_batches (expires_at);
+
             CREATE TABLE IF NOT EXISTS reader_fetch_runs (
                 id BIGSERIAL PRIMARY KEY,
                 feed_id TEXT NOT NULL,
@@ -1147,6 +1166,47 @@ export function getMultiAiSummaryPrompt() {
 
 export function updateMultiAiSummaryPrompt(prompt: string) {
     return updateReaderSetting(multiAiSummaryPromptSettingKey, prompt);
+}
+
+export async function getAiSummaryBatch(cacheKey: string): Promise<ReaderAiSummaryBatch | undefined> {
+    const result = await getPool().query(
+        `
+            SELECT configured, message, summary,
+                   EXTRACT(EPOCH FROM created_at) * 1000 AS created_at_ms,
+                   EXTRACT(EPOCH FROM expires_at) * 1000 AS expires_at_ms
+            FROM reader_ai_summary_batches
+            WHERE cache_key = $1
+                AND expires_at > NOW()
+        `,
+        [cacheKey]
+    );
+    const row = result.rows[0];
+    if (!row) {
+        return;
+    }
+    return {
+        configured: Boolean(row.configured),
+        createdAt: Number(row.created_at_ms),
+        expiresAt: Number(row.expires_at_ms),
+        message: String(row.message || ''),
+        summary: String(row.summary || ''),
+    };
+}
+
+export async function upsertAiSummaryBatch(cacheKey: string, batch: ReaderAiSummaryBatch) {
+    await getPool().query(
+        `
+            INSERT INTO reader_ai_summary_batches (cache_key, configured, message, summary, created_at, expires_at)
+            VALUES ($1, $2, $3, $4, TO_TIMESTAMP($5 / 1000.0), TO_TIMESTAMP($6 / 1000.0))
+            ON CONFLICT (cache_key) DO UPDATE SET
+                configured = EXCLUDED.configured,
+                message = EXCLUDED.message,
+                summary = EXCLUDED.summary,
+                created_at = EXCLUDED.created_at,
+                expires_at = EXCLUDED.expires_at
+        `,
+        [cacheKey, batch.configured, batch.message, batch.summary, batch.createdAt, batch.expiresAt]
+    );
 }
 
 export async function getAiSummaryPush(pushId: string) {

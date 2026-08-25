@@ -1,9 +1,11 @@
+import { createHash } from 'node:crypto';
+
 import MarkdownIt from 'markdown-it';
 
 import logger from '@/utils/logger';
 
 import type { ReaderAiSummaryPush, ReaderFeed, ReaderItem } from './store';
-import { getFeedsAiSummaryPrompt, getMultiAiSummaryPrompt, getPool, rowToItem, updateFeedsAiSummaryPrompt, updateMultiAiSummaryPrompt } from './store';
+import { getAiSummaryBatch, getFeedsAiSummaryPrompt, getMultiAiSummaryPrompt, getPool, rowToItem, updateFeedsAiSummaryPrompt, updateMultiAiSummaryPrompt, upsertAiSummaryBatch } from './store';
 
 const markdown = MarkdownIt({
     breaks: true,
@@ -13,12 +15,17 @@ const markdown = MarkdownIt({
 const larkMarkdownChunkLength = 4000;
 const summaryItemContentLimit = 240;
 const summaryBatchItemLimit = 200;
-const summaryBatchConcurrency = 4;
+const defaultSummaryBatchConcurrency = 2;
 const summaryBatchMaxTokens = 900;
+const summaryBatchCacheTtlMs = 60 * 60 * 1000;
+const defaultAiRetries = 2;
+const aiRetryDelayMs = 1000;
+const estimatedBatchDurationMs = 60 * 1000;
+const estimatedFinalDurationMs = 60 * 1000;
 const summaryCacheTtlMs = 5 * 60 * 1000;
 const defaultAiMaxTokens = 3000;
 const defaultAiTimeoutMs = 180000;
-const summaryCacheVersion = 3;
+const summaryCacheVersion = 4;
 const linkPreservationInstruction = [
     '链接保留要求：',
     '1. 每条具体内容如果引用原始文章，链接行必须紧跟对应内容下方，格式为：链接：<原始URL>。',
@@ -48,12 +55,31 @@ type AiSummaryCacheEntry = {
 
 type AiSummaryBuildOptions = {
     forceRefresh?: boolean;
+    onProgress?: AiSummaryProgressHandler;
 };
 
 type AiSummaryCacheSource = 'cache' | 'fresh' | 'in-flight';
 
 const aiSummaryCache = new Map<string, AiSummaryCacheEntry>();
 const aiSummaryInFlight = new Map<string, Promise<AiSummaryCacheEntry>>();
+const aiSummaryBatchCache = new Map<string, AiSummaryBatchResult>();
+
+export type AiSummaryProgress = {
+    attempt?: number;
+    completedBatches: number;
+    currentBatch?: number;
+    estimatedTotalMs: number;
+    itemCount: number;
+    stage: 'collecting' | 'batch' | 'finalizing' | 'retrying';
+    totalBatches: number;
+};
+
+type AiSummaryProgressHandler = (progress: AiSummaryProgress) => void;
+
+type AiSummaryBatchResult = AiSummaryResult & {
+    createdAt: number;
+    expiresAt: number;
+};
 
 export const defaultAiSummaryPrompt = [
     '请用中文总结这个 RSS 订阅源最近 {{days}} 天的内容。',
@@ -185,7 +211,14 @@ async function getSummaryItems(feedIds: string[], days: number) {
 }
 
 function createSummaryCacheKey(feedIds: string[], days: number, promptTemplate: string) {
-    return JSON.stringify({ days, feedIds: [...feedIds].toSorted((left, right) => left.localeCompare(right)), promptTemplate, version: summaryCacheVersion });
+    return JSON.stringify({
+        days,
+        feedIds: [...feedIds].toSorted((left, right) => left.localeCompare(right)),
+        model: process.env.READER_AI_MODEL || '',
+        promptTemplate,
+        requestUrl: getAiRequestUrl(),
+        version: summaryCacheVersion,
+    });
 }
 
 function getCachedAiSummary(cacheKey: string) {
@@ -206,8 +239,15 @@ function cacheAiSummary(cacheKey: string, entry: AiSummaryCacheEntry) {
     }
 }
 
+export function estimateAiSummaryDurationMs(itemCount: number) {
+    const batchCount = Math.max(1, Math.ceil(Math.max(itemCount, 0) / summaryBatchItemLimit));
+    const batchConcurrency = getSummaryBatchConcurrency();
+    return Math.ceil(batchCount / batchConcurrency) * estimatedBatchDurationMs + (batchCount > 1 ? estimatedFinalDurationMs : 0);
+}
+
 export function clearAiSummaryCache() {
     aiSummaryCache.clear();
+    aiSummaryBatchCache.clear();
     aiSummaryInFlight.clear();
 }
 
@@ -237,6 +277,62 @@ function renderFinalSummaryPrompt(promptTemplate: string, batchSummaries: string
     ].join('\n\n');
 }
 
+function createSummaryBatchCacheKey(prompt: string) {
+    return createHash('sha256')
+        .update(
+            JSON.stringify({
+                model: process.env.READER_AI_MODEL || '',
+                prompt,
+                requestUrl: getAiRequestUrl(),
+                version: summaryCacheVersion,
+            })
+        )
+        .digest('hex');
+}
+
+async function getCachedAiSummaryBatch(cacheKey: string) {
+    const memoryCached = aiSummaryBatchCache.get(cacheKey);
+    if (memoryCached) {
+        if (memoryCached.expiresAt > Date.now()) {
+            return memoryCached;
+        }
+        aiSummaryBatchCache.delete(cacheKey);
+    }
+    try {
+        const cached = await getAiSummaryBatch(cacheKey);
+        if (!cached || cached.expiresAt <= Date.now()) {
+            return;
+        }
+        const result = {
+            ...cached,
+            prompt: '',
+        };
+        aiSummaryBatchCache.set(cacheKey, result);
+        return result;
+    } catch (error) {
+        logger.warn(`Reader AI summary batch cache read failed: ${error}`);
+    }
+}
+
+async function cacheAiSummaryBatch(cacheKey: string, result: AiSummaryResult, prompt: string) {
+    if (!result.configured || !result.summary) {
+        return;
+    }
+    const createdAt = Date.now();
+    const entry = {
+        ...result,
+        prompt,
+        createdAt,
+        expiresAt: createdAt + summaryBatchCacheTtlMs,
+    };
+    aiSummaryBatchCache.set(cacheKey, entry);
+    try {
+        await upsertAiSummaryBatch(cacheKey, entry);
+    } catch (error) {
+        logger.warn(`Reader AI summary batch cache write failed: ${error}`);
+    }
+}
+
 async function mapWithConcurrency<T, TResult>(items: T[], concurrency: number, mapper: (item: T, index: number) => Promise<TResult>) {
     const results = [] as TResult[];
     results.length = items.length;
@@ -253,22 +349,152 @@ async function mapWithConcurrency<T, TResult>(items: T[], concurrency: number, m
     return results;
 }
 
-async function requestAiSummaryForItems(promptTemplate: string, items: SummaryInputItem[], days: number, totalItemCount = items.length) {
+function getAiRetryCount() {
+    const configuredRetries = Number(process.env.READER_AI_RETRIES);
+    return Number.isSafeInteger(configuredRetries) && configuredRetries >= 0 ? configuredRetries : defaultAiRetries;
+}
+
+function getSummaryBatchConcurrency() {
+    const configuredConcurrency = Number(process.env.READER_AI_BATCH_CONCURRENCY);
+    return Number.isSafeInteger(configuredConcurrency) && configuredConcurrency > 0 ? Math.min(configuredConcurrency, 4) : defaultSummaryBatchConcurrency;
+}
+
+function waitForAiRetry() {
+    return new Promise((resolve) => setTimeout(resolve, aiRetryDelayMs));
+}
+
+async function requestAiSummaryWithRetry(prompt: string, maxTokens: number | undefined, description: string, onRetry?: (attempt: number) => void) {
+    const maxAttempts = getAiRetryCount() + 1;
+    let lastError: unknown;
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+        try {
+            // Retries must remain sequential so one upstream request does not multiply load.
+            // oxlint-disable-next-line eslint/no-await-in-loop
+            return await requestAiSummary(prompt, maxTokens);
+        } catch (error) {
+            lastError = error;
+            if (attempt >= maxAttempts) {
+                throw error;
+            }
+            const nextAttempt = attempt + 1;
+            logger.warn(`Reader AI summary ${description} failed on attempt ${attempt}/${maxAttempts}: ${error}; retrying attempt ${nextAttempt}/${maxAttempts}`);
+            onRetry?.(nextAttempt);
+            // oxlint-disable-next-line eslint/no-await-in-loop
+            await waitForAiRetry();
+        }
+    }
+    throw lastError instanceof Error ? lastError : new Error(String(lastError));
+}
+
+function reportAiSummaryProgress(onProgress: AiSummaryProgressHandler | undefined, progress: AiSummaryProgress) {
+    onProgress?.(progress);
+}
+
+async function requestAiSummaryForItems(promptTemplate: string, items: SummaryInputItem[], days: number, totalItemCount = items.length, onProgress?: AiSummaryProgressHandler) {
     if (items.length <= summaryBatchItemLimit) {
         const prompt = renderSummaryPrompt(promptTemplate, items, days, totalItemCount);
+        const batchCount = 1;
+        const batchCacheKey = createSummaryBatchCacheKey(prompt);
+        const cachedBatch = await getCachedAiSummaryBatch(batchCacheKey);
+        if (cachedBatch) {
+            reportAiSummaryProgress(onProgress, {
+                completedBatches: 1,
+                currentBatch: 1,
+                estimatedTotalMs: estimateAiSummaryDurationMs(totalItemCount),
+                itemCount: totalItemCount,
+                stage: 'batch',
+                totalBatches: batchCount,
+            });
+            return cachedBatch;
+        }
+        reportAiSummaryProgress(onProgress, {
+            completedBatches: 0,
+            currentBatch: 1,
+            estimatedTotalMs: estimateAiSummaryDurationMs(totalItemCount),
+            itemCount: totalItemCount,
+            stage: 'batch',
+            totalBatches: batchCount,
+        });
+        const result = withCleanSummaryLinks(await requestAiSummaryWithRetry(prompt, undefined, 'single batch'));
+        await cacheAiSummaryBatch(batchCacheKey, result, prompt);
+        reportAiSummaryProgress(onProgress, {
+            completedBatches: 1,
+            currentBatch: 1,
+            estimatedTotalMs: estimateAiSummaryDurationMs(totalItemCount),
+            itemCount: totalItemCount,
+            stage: 'batch',
+            totalBatches: batchCount,
+        });
         return {
-            ...withCleanSummaryLinks(await requestAiSummary(prompt)),
+            ...result,
             prompt,
         };
     }
 
     const batches = splitSummaryItems(items);
-    logger.info(`Reader AI summary batching: itemCount=${items.length} batchCount=${batches.length} batchSize=${summaryBatchItemLimit}`);
-    const batchResults = await mapWithConcurrency(batches, summaryBatchConcurrency, async (batch, index) => {
+    const batchCount = batches.length;
+    const estimatedTotalMs = estimateAiSummaryDurationMs(totalItemCount);
+    let completedBatches = 0;
+    logger.info(`Reader AI summary batching: itemCount=${items.length} batchCount=${batchCount} batchSize=${summaryBatchItemLimit}`);
+    reportAiSummaryProgress(onProgress, {
+        completedBatches,
+        estimatedTotalMs,
+        itemCount: totalItemCount,
+        stage: 'batch',
+        totalBatches: batchCount,
+    });
+    const batchResults = await mapWithConcurrency(batches, getSummaryBatchConcurrency(), async (batch, index) => {
         const prompt = renderBatchSummaryPrompt(promptTemplate, batch, days, index + 1, batches.length, totalItemCount);
-        const result = await requestAiSummary(prompt, summaryBatchMaxTokens);
+        const batchCacheKey = createSummaryBatchCacheKey(prompt);
+        const cachedBatch = await getCachedAiSummaryBatch(batchCacheKey);
+        if (cachedBatch) {
+            completedBatches++;
+            reportAiSummaryProgress(onProgress, {
+                completedBatches,
+                currentBatch: index + 1,
+                estimatedTotalMs,
+                itemCount: totalItemCount,
+                stage: 'batch',
+                totalBatches: batchCount,
+            });
+            return {
+                ...cachedBatch,
+                prompt,
+            };
+        }
+        reportAiSummaryProgress(onProgress, {
+            completedBatches,
+            currentBatch: index + 1,
+            estimatedTotalMs,
+            itemCount: totalItemCount,
+            stage: 'batch',
+            totalBatches: batchCount,
+        });
+        const result = withCleanSummaryLinks(
+            await requestAiSummaryWithRetry(prompt, summaryBatchMaxTokens, `batch ${index + 1}/${batchCount}`, (attempt) => {
+                reportAiSummaryProgress(onProgress, {
+                    attempt,
+                    completedBatches,
+                    currentBatch: index + 1,
+                    estimatedTotalMs,
+                    itemCount: totalItemCount,
+                    stage: 'retrying',
+                    totalBatches: batchCount,
+                });
+            })
+        );
+        await cacheAiSummaryBatch(batchCacheKey, result, prompt);
+        completedBatches++;
+        reportAiSummaryProgress(onProgress, {
+            completedBatches,
+            currentBatch: index + 1,
+            estimatedTotalMs,
+            itemCount: totalItemCount,
+            stage: 'batch',
+            totalBatches: batchCount,
+        });
         return {
-            ...withCleanSummaryLinks(result),
+            ...result,
             prompt,
         };
     });
@@ -286,16 +512,41 @@ async function requestAiSummaryForItems(promptTemplate: string, items: SummaryIn
         days,
         totalItemCount
     );
+    reportAiSummaryProgress(onProgress, {
+        completedBatches,
+        estimatedTotalMs,
+        itemCount: totalItemCount,
+        stage: 'finalizing',
+        totalBatches: batchCount,
+    });
     return {
-        ...withCleanSummaryLinks(await requestAiSummary(finalPrompt)),
+        ...withCleanSummaryLinks(
+            await requestAiSummaryWithRetry(finalPrompt, undefined, 'final summary', (attempt) => {
+                reportAiSummaryProgress(onProgress, {
+                    attempt,
+                    completedBatches,
+                    estimatedTotalMs,
+                    itemCount: totalItemCount,
+                    stage: 'retrying',
+                    totalBatches: batchCount,
+                });
+            })
+        ),
         prompt: finalPrompt,
     };
 }
 
-async function generateAiSummaryCacheEntry(feedIds: string[], days: number, promptTemplate: string): Promise<AiSummaryCacheEntry> {
+async function generateAiSummaryCacheEntry(feedIds: string[], days: number, promptTemplate: string, onProgress?: AiSummaryProgressHandler): Promise<AiSummaryCacheEntry> {
     const items = await getSummaryItems(feedIds, days);
+    reportAiSummaryProgress(onProgress, {
+        completedBatches: 0,
+        estimatedTotalMs: estimateAiSummaryDurationMs(items.length),
+        itemCount: items.length,
+        stage: 'collecting',
+        totalBatches: Math.max(1, Math.ceil(items.length / summaryBatchItemLimit)),
+    });
     const aiResult = items.length
-        ? await requestAiSummaryForItems(promptTemplate, items, days)
+        ? await requestAiSummaryForItems(promptTemplate, items, days, items.length, onProgress)
         : {
               configured: Boolean((process.env.READER_AI_API_KEY || process.env.OPENAI_API_KEY) && process.env.READER_AI_MODEL),
               message: '',
@@ -352,7 +603,7 @@ export async function buildAiSummaryResponse(feedIds: string[], days: number, pr
     }
 
     logger.info(`Reader AI summary cache miss: feedCount=${feedIds.length} days=${days} forceRefresh=${forceRefresh}`);
-    const generationRequest = generateAiSummaryCacheEntry(feedIds, days, promptTemplate);
+    const generationRequest = generateAiSummaryCacheEntry(feedIds, days, promptTemplate, options.onProgress);
     aiSummaryInFlight.set(cacheKey, generationRequest);
     try {
         const entry = await generationRequest;
@@ -430,7 +681,13 @@ async function requestAiSummary(prompt: string, maxTokensOverride?: number) {
     } finally {
         clearTimeout(timeout);
     }
-    const data = await response.json();
+    const responseText = await response.text();
+    let data: { choices?: Array<{ message?: { content?: string } }>; error?: { message?: string } } = {};
+    try {
+        data = responseText ? JSON.parse(responseText) : {};
+    } catch {
+        throw new Error(`AI summary upstream returned invalid JSON (HTTP ${response.status}).`);
+    }
     if (!response.ok) {
         throw new Error(data?.error?.message || 'AI summary request failed.');
     }
