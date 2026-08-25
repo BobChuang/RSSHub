@@ -96,6 +96,8 @@ const { buildAiSummaryResponse, clearAiSummaryCache, defaultMultiAiSummaryPrompt
 describe('reader ai summary', () => {
     beforeEach(() => {
         vi.clearAllMocks();
+        mocks.getAiSummaryBatch.mockReset();
+        mocks.upsertAiSummaryBatch.mockReset();
         clearAiSummaryCache();
         mocks.getFeedsAiSummaryPrompt.mockResolvedValue('saved single-feed prompt');
         mocks.getMultiAiSummaryPrompt.mockResolvedValue('saved multi-feed prompt');
@@ -192,6 +194,54 @@ describe('reader ai summary', () => {
         expect(batchPrompts.join('\n')).toContain('Title 401');
         expect(result.prompt).toContain('第 1/3 批中间总结');
         expect(result.prompt).not.toContain('代表性内容');
+    });
+
+    it('reuses a completed 200-item block when the feed grows', async () => {
+        const persistedBatches = new Map();
+        mocks.getAiSummaryBatch.mockImplementation((cacheKey) => Promise.resolve(persistedBatches.get(cacheKey)));
+        mocks.upsertAiSummaryBatch.mockImplementation((cacheKey, batch) => {
+            persistedBatches.set(cacheKey, batch);
+            return Promise.resolve();
+        });
+        const fetchMock = mockAiFetch();
+        const initialItems = mockItems(200);
+        const expandedItems = [...mockItems(10, 200), ...initialItems];
+        mocks.getPoolQuery.mockResolvedValueOnce({ rows: initialItems }).mockResolvedValueOnce({ rows: expandedItems });
+
+        await buildAiSummaryResponse(['feed-a'], 7);
+        const callsAfterInitialSummary = fetchMock.mock.calls.length;
+        clearAiSummaryCache();
+        const result = await buildAiSummaryResponse(['feed-a'], 7);
+
+        expect(callsAfterInitialSummary).toBe(1);
+        expect(fetchMock).toHaveBeenCalledTimes(callsAfterInitialSummary + 2);
+        expect(result.itemCount).toBe(210);
+        expect(mocks.upsertAiSummaryBatch).toHaveBeenCalledTimes(1);
+    });
+
+    it('rebuilds an open block as it grows and pins it once it reaches 200 items', async () => {
+        const persistedBatches = new Map();
+        mocks.getAiSummaryBatch.mockImplementation((cacheKey) => Promise.resolve(persistedBatches.get(cacheKey)));
+        mocks.upsertAiSummaryBatch.mockImplementation((cacheKey, batch) => {
+            persistedBatches.set(cacheKey, batch);
+            return Promise.resolve();
+        });
+        const fetchMock = mockAiFetch();
+        const items150 = mockItems(150);
+        const items160 = [...mockItems(10, 150), ...items150];
+        const items200 = [...mockItems(40, 160), ...items160];
+        mocks.getPoolQuery.mockResolvedValueOnce({ rows: items150 }).mockResolvedValueOnce({ rows: items160 }).mockResolvedValueOnce({ rows: items200 }).mockResolvedValueOnce({ rows: items200 });
+
+        await buildAiSummaryResponse(['feed-a'], 7);
+        clearAiSummaryCache();
+        await buildAiSummaryResponse(['feed-a'], 7);
+        clearAiSummaryCache();
+        await buildAiSummaryResponse(['feed-a'], 7);
+        clearAiSummaryCache();
+        await buildAiSummaryResponse(['feed-a'], 7);
+
+        expect(fetchMock).toHaveBeenCalledTimes(3);
+        expect(mocks.upsertAiSummaryBatch).toHaveBeenCalledTimes(1);
     });
 
     it('reports batch progress before the final aggregation', async () => {

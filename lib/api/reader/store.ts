@@ -82,7 +82,7 @@ export type ReaderAiSummaryBatch = {
     message: string;
     summary: string;
     createdAt: number;
-    expiresAt: number;
+    expiresAt: number | null;
 };
 
 export type ReaderFeedInput = {
@@ -728,8 +728,11 @@ export async function ensureSchema() {
                 message TEXT NOT NULL DEFAULT '',
                 summary TEXT NOT NULL DEFAULT '',
                 created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                expires_at TIMESTAMPTZ NOT NULL
+                expires_at TIMESTAMPTZ
             );
+
+            ALTER TABLE reader_ai_summary_batches
+            ALTER COLUMN expires_at DROP NOT NULL;
 
             CREATE INDEX IF NOT EXISTS reader_ai_summary_batches_expires_idx ON reader_ai_summary_batches (expires_at);
 
@@ -1176,7 +1179,7 @@ export async function getAiSummaryBatch(cacheKey: string): Promise<ReaderAiSumma
                    EXTRACT(EPOCH FROM expires_at) * 1000 AS expires_at_ms
             FROM reader_ai_summary_batches
             WHERE cache_key = $1
-                AND expires_at > NOW()
+                AND (expires_at IS NULL OR expires_at > NOW())
         `,
         [cacheKey]
     );
@@ -1187,7 +1190,7 @@ export async function getAiSummaryBatch(cacheKey: string): Promise<ReaderAiSumma
     return {
         configured: Boolean(row.configured),
         createdAt: Number(row.created_at_ms),
-        expiresAt: Number(row.expires_at_ms),
+        expiresAt: row.expires_at_ms === null ? null : Number(row.expires_at_ms),
         message: String(row.message || ''),
         summary: String(row.summary || ''),
     };
@@ -1197,7 +1200,7 @@ export async function upsertAiSummaryBatch(cacheKey: string, batch: ReaderAiSumm
     await getPool().query(
         `
             INSERT INTO reader_ai_summary_batches (cache_key, configured, message, summary, created_at, expires_at)
-            VALUES ($1, $2, $3, $4, TO_TIMESTAMP($5 / 1000.0), TO_TIMESTAMP($6 / 1000.0))
+            VALUES ($1, $2, $3, $4, TO_TIMESTAMP($5 / 1000.0), CASE WHEN $6 IS NULL THEN NULL ELSE TO_TIMESTAMP($6 / 1000.0) END)
             ON CONFLICT (cache_key) DO UPDATE SET
                 configured = EXCLUDED.configured,
                 message = EXCLUDED.message,

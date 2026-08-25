@@ -17,7 +17,7 @@ const summaryItemContentLimit = 240;
 const summaryBatchItemLimit = 200;
 const defaultSummaryBatchConcurrency = 2;
 const summaryBatchMaxTokens = 900;
-const summaryBatchCacheTtlMs = 60 * 60 * 1000;
+const summaryOpenBatchCacheTtlMs = 5 * 60 * 1000;
 const defaultAiRetries = 2;
 const aiRetryDelayMs = 1000;
 const estimatedBatchDurationMs = 60 * 1000;
@@ -25,7 +25,7 @@ const estimatedFinalDurationMs = 60 * 1000;
 const summaryCacheTtlMs = 5 * 60 * 1000;
 const defaultAiMaxTokens = 3000;
 const defaultAiTimeoutMs = 180000;
-const summaryCacheVersion = 4;
+const summaryCacheVersion = 5;
 const linkPreservationInstruction = [
     '链接保留要求：',
     '1. 每条具体内容如果引用原始文章，链接行必须紧跟对应内容下方，格式为：链接：<原始URL>。',
@@ -78,7 +78,7 @@ type AiSummaryProgressHandler = (progress: AiSummaryProgress) => void;
 
 type AiSummaryBatchResult = AiSummaryResult & {
     createdAt: number;
-    expiresAt: number;
+    expiresAt: number | null;
 };
 
 export const defaultAiSummaryPrompt = [
@@ -226,7 +226,7 @@ function getCachedAiSummary(cacheKey: string) {
     if (!cached) {
         return;
     }
-    if (cached.expiresAt <= Date.now()) {
+    if (cached.expiresAt !== null && cached.expiresAt <= Date.now()) {
         aiSummaryCache.delete(cacheKey);
         return;
     }
@@ -252,7 +252,12 @@ export function clearAiSummaryCache() {
 }
 
 function splitSummaryItems(items: SummaryInputItem[]) {
-    return Array.from({ length: Math.ceil(items.length / summaryBatchItemLimit) }, (_, index) => items.slice(index * summaryBatchItemLimit, (index + 1) * summaryBatchItemLimit));
+    const batches: SummaryInputItem[][] = [];
+    // Keep complete blocks stable while new items arrive at the head of the feed.
+    for (let end = items.length; end > 0; end -= summaryBatchItemLimit) {
+        batches.push(items.slice(Math.max(0, end - summaryBatchItemLimit), end));
+    }
+    return batches;
 }
 
 function renderBatchSummaryPrompt(promptTemplate: string, items: SummaryInputItem[], days: number, batchIndex: number, batchCount: number, totalItemCount: number) {
@@ -277,7 +282,8 @@ function renderFinalSummaryPrompt(promptTemplate: string, batchSummaries: string
     ].join('\n\n');
 }
 
-function createSummaryBatchCacheKey(prompt: string) {
+function createSummaryBatchCacheKey(promptTemplate: string, items: SummaryInputItem[], days: number) {
+    const prompt = renderSummaryPrompt(promptTemplate, items, days, items.length);
     return createHash('sha256')
         .update(
             JSON.stringify({
@@ -293,14 +299,14 @@ function createSummaryBatchCacheKey(prompt: string) {
 async function getCachedAiSummaryBatch(cacheKey: string) {
     const memoryCached = aiSummaryBatchCache.get(cacheKey);
     if (memoryCached) {
-        if (memoryCached.expiresAt > Date.now()) {
+        if (memoryCached.expiresAt === null || memoryCached.expiresAt > Date.now()) {
             return memoryCached;
         }
         aiSummaryBatchCache.delete(cacheKey);
     }
     try {
         const cached = await getAiSummaryBatch(cacheKey);
-        if (!cached || cached.expiresAt <= Date.now()) {
+        if (!cached || (cached.expiresAt !== null && cached.expiresAt <= Date.now())) {
             return;
         }
         const result = {
@@ -314,7 +320,7 @@ async function getCachedAiSummaryBatch(cacheKey: string) {
     }
 }
 
-async function cacheAiSummaryBatch(cacheKey: string, result: AiSummaryResult, prompt: string) {
+async function cacheAiSummaryBatch(cacheKey: string, result: AiSummaryResult, prompt: string, persist: boolean) {
     if (!result.configured || !result.summary) {
         return;
     }
@@ -323,9 +329,12 @@ async function cacheAiSummaryBatch(cacheKey: string, result: AiSummaryResult, pr
         ...result,
         prompt,
         createdAt,
-        expiresAt: createdAt + summaryBatchCacheTtlMs,
+        expiresAt: persist ? null : createdAt + summaryOpenBatchCacheTtlMs,
     };
     aiSummaryBatchCache.set(cacheKey, entry);
+    if (!persist) {
+        return;
+    }
     try {
         await upsertAiSummaryBatch(cacheKey, entry);
     } catch (error) {
@@ -394,7 +403,7 @@ async function requestAiSummaryForItems(promptTemplate: string, items: SummaryIn
     if (items.length <= summaryBatchItemLimit) {
         const prompt = renderSummaryPrompt(promptTemplate, items, days, totalItemCount);
         const batchCount = 1;
-        const batchCacheKey = createSummaryBatchCacheKey(prompt);
+        const batchCacheKey = createSummaryBatchCacheKey(promptTemplate, items, days);
         const cachedBatch = await getCachedAiSummaryBatch(batchCacheKey);
         if (cachedBatch) {
             reportAiSummaryProgress(onProgress, {
@@ -405,7 +414,10 @@ async function requestAiSummaryForItems(promptTemplate: string, items: SummaryIn
                 stage: 'batch',
                 totalBatches: batchCount,
             });
-            return cachedBatch;
+            return {
+                ...cachedBatch,
+                prompt,
+            };
         }
         reportAiSummaryProgress(onProgress, {
             completedBatches: 0,
@@ -416,7 +428,7 @@ async function requestAiSummaryForItems(promptTemplate: string, items: SummaryIn
             totalBatches: batchCount,
         });
         const result = withCleanSummaryLinks(await requestAiSummaryWithRetry(prompt, undefined, 'single batch'));
-        await cacheAiSummaryBatch(batchCacheKey, result, prompt);
+        await cacheAiSummaryBatch(batchCacheKey, result, prompt, items.length === summaryBatchItemLimit);
         reportAiSummaryProgress(onProgress, {
             completedBatches: 1,
             currentBatch: 1,
@@ -445,7 +457,7 @@ async function requestAiSummaryForItems(promptTemplate: string, items: SummaryIn
     });
     const batchResults = await mapWithConcurrency(batches, getSummaryBatchConcurrency(), async (batch, index) => {
         const prompt = renderBatchSummaryPrompt(promptTemplate, batch, days, index + 1, batches.length, totalItemCount);
-        const batchCacheKey = createSummaryBatchCacheKey(prompt);
+        const batchCacheKey = createSummaryBatchCacheKey(promptTemplate, batch, days);
         const cachedBatch = await getCachedAiSummaryBatch(batchCacheKey);
         if (cachedBatch) {
             completedBatches++;
@@ -483,7 +495,7 @@ async function requestAiSummaryForItems(promptTemplate: string, items: SummaryIn
                 });
             })
         );
-        await cacheAiSummaryBatch(batchCacheKey, result, prompt);
+        await cacheAiSummaryBatch(batchCacheKey, result, prompt, batch.length === summaryBatchItemLimit);
         completedBatches++;
         reportAiSummaryProgress(onProgress, {
             completedBatches,
